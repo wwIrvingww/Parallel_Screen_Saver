@@ -3,10 +3,12 @@
 #include <vector>
 
 class TextRender {
-    public:
-        // N = número de caracteres,
-        TextRender(int N, const sf::Font& font, unsigned int charSize, sf::Vector2u windowSize);
-        void render(sf::RenderWindow& window);
-    private:
-        std::vector<sf::Text> texts;
+public:
+    TextRender(int N, const sf::Font& font, unsigned int charSize, sf::Vector2u windowSize);
+    void render(sf::RenderWindow& window);
+    void resize(sf::Vector2u newSize);
+
+private:
+    std::vector<sf::Text> texts;
+    sf::Vector2u size_;
 };

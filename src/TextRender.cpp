@@ -1,8 +1,9 @@
-#include "./TextRender.h"
+#include "TextRender.h"
 #include <cstdlib>
 #include <ctime>
 
 TextRender::TextRender(int N, const sf::Font& font, unsigned int charSize, sf::Vector2u windowSize)
+    : size_(windowSize) // <-- guarda tamaño inicial
 {
     std::srand(unsigned(std::time(nullptr)));
     for (int i = 0; i < N; ++i) {
@@ -19,8 +20,10 @@ TextRender::TextRender(int N, const sf::Font& font, unsigned int charSize, sf::V
     }
 }
 
-void TextRender::render(sf::RenderWindow& window)
-{
-    for (auto& t : texts)
-        window.draw(t);
+void TextRender::render(sf::RenderWindow& window) {
+    for (auto& t : texts) window.draw(t);
+}
+
+void TextRender::resize(sf::Vector2u newSize) {
+    size_ = newSize;
 }
