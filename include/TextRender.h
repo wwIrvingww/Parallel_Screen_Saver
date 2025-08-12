@@ -1,6 +1,7 @@
 #pragma once
 #include <SFML/Graphics.hpp>
 #include <vector>
+#include <random>
 
 class TextRender {
 public:
@@ -11,4 +12,7 @@ public:
 private:
     std::vector<sf::Text> texts;
     sf::Vector2u size_;
+    
+    // Generador de colores pseudoaleatorios
+    sf::Color generatePseudoRandomColor(int seed);
 };

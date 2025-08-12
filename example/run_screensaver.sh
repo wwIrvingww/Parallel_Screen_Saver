@@ -22,8 +22,8 @@ make -j
 
 popd > /dev/null
 
-echo "Ejecutando matrix_screensaver con N=$N en ${WIDTH}×${HEIGHT}…"
+echo "Ejecutando matrix_screensaver con N=$N en ${RES}…"
 
 pushd "$PROJECT_ROOT" > /dev/null
-"$BUILD_DIR/matrix_screensaver" "$N" "$WIDTH" "$HEIGHT"
+"$BUILD_DIR/matrix_screensaver" "$N" "$RES"
 popd > /dev/null
