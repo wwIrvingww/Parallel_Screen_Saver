@@ -1,37 +1,40 @@
 #include <SFML/Graphics.hpp>
-#include "TextRender.h"  
-#include <iostream>
-
-//parseo de argumentos y progra defensiva
 #include <iostream>
 #include <string>
 #include <regex>
 #include <cstdlib>
 #include <filesystem>
+#include "TextRender.h"
+
+// -------------------- CLI --------------------
+enum class MotionMode; // ya viene de TextRender.h, pero evitamos warnings
 
 struct CliOptions {
     int nChars = 200;
     int width  = 800;
     int height = 600;
-    bool forceSequential = false; // enlazar con código secuencial
-    int threads = 0;        // 0 = auto / no forzado (para versión paralela)
+    bool forceSequential = false;
+    int threads = 0;
+    MotionMode mode = MotionMode::Rain; // rain por defecto
+    float speed = 160.f;                // usado por rain/bounce
 };
 
 static void print_usage(const char* prog) {
     std::cout
         << "Uso: " << prog << " [opciones] [N] [ANCHOxALTO]\n\n"
         << "Posicionales:\n"
-        << "  N               Numero de caracteres a renderizar (defecto: 200)\n"
-        << "  ANCHOxALTO      Resolucion de ventana, p.ej. 1024x768 (defecto: 800x600)\n\n"
+        << "  N               Numero de caracteres (defecto: 200)\n"
+        << "  ANCHOxALTO      Resolucion, p.ej. 1024x768 (defecto: 800x600)\n\n"
         << "Opciones:\n"
-        << "  --seq           Fuerza modo secuencial (enlaza con codigo secuencial)\n"
-        << "  --threads K     Sugerir K hilos para modo paralelo (si aplica)\n"
-        << "  -h, --help      Muestra esta ayuda\n\n"
+        << "  --seq                 Fuerza modo secuencial\n"
+        << "  --threads K           Sugerir K hilos (para paralelo futuro)\n"
+        << "  --mode rain|bounce|spiral   Modo de movimiento (defecto: rain)\n"
+        << "  --speed V             Velocidad base (px/s, defecto: 160)\n"
+        << "  -h, --help            Ayuda\n\n"
         << "Ejemplos:\n"
         << "  " << prog << "\n"
-        << "  " << prog << " 150 1024x768\n"
-        << "  " << prog << " --seq 300\n"
-        << "  " << prog << " --threads 8 400 1920x1080\n";
+        << "  " << prog << " 150 1024x768 --mode rain --speed 220\n"
+        << "  " << prog << " --mode bounce\n";
 }
 
 static bool parse_resolution(const std::string& s, int& w, int& h) {
@@ -52,7 +55,7 @@ static bool file_exists(const std::string& path) {
 }
 
 static bool parse_cli(int argc, char** argv, CliOptions& opts) {
-    // 1) Parse opciones tipo --flag/--threads
+    // ayuda
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "-h" || a == "--help") {
@@ -60,111 +63,79 @@ static bool parse_cli(int argc, char** argv, CliOptions& opts) {
             std::exit(0);
         }
     }
-
-    // Pasada 2: consumir opciones con argumento
+    // opciones
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--seq") {
-            opts.forceSequential = true;
-            continue;
-        }
+        if (a == "--seq") { opts.forceSequential = true; continue; }
         if (a == "--threads") {
-            if (i + 1 >= argc) {
-                std::cerr << "Error: --threads requiere un valor.\n";
-                return false;
-            }
+            if (i + 1 >= argc) { std::cerr << "Error: --threads K\n"; return false; }
             int k = std::atoi(argv[++i]);
-            if (k <= 0 || k > 1024) {
-                std::cerr << "Error: --threads K debe ser 1..1024.\n";
-                return false;
-            }
-            opts.threads = k;
+            if (k <= 0 || k > 1024) { std::cerr << "Error: --threads 1..1024\n"; return false; }
+            opts.threads = k; continue;
+        }
+        if (a == "--mode") {
+            if (i + 1 >= argc) { std::cerr << "Error: --mode requiere valor.\n"; return false; }
+            std::string m = argv[++i];
+            if      (m == "rain")   opts.mode = MotionMode::Rain;
+            else if (m == "bounce") opts.mode = MotionMode::Bounce;
+            else if (m == "spiral") opts.mode = MotionMode::Spiral;
+            else { std::cerr << "Error: --mode {rain|bounce|spiral}\n"; return false; }
             continue;
         }
-        // No es opción -> tratamos como posicional; lo procesamos abajo
+        if (a == "--speed") {
+            if (i + 1 >= argc) { std::cerr << "Error: --speed V\n"; return false; }
+            float v = std::atof(argv[++i]);
+            if (v <= 0.f || v > 5000.f) { std::cerr << "Error: --speed 1..5000\n"; return false; }
+            opts.speed = v; continue;
+        }
     }
-
-    // 2) Posicionales (N y ANCHOxALTO) en el orden que aparezcan
-    int positionalCount = 0;
+    // posicionales: N y ANCHOxALTO (en cualquier orden)
+    int pos = 0;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--seq" || a == "--threads" || a == "-h" || a == "--help") {
-            if (a == "--threads") ++i; // saltar valor ya consumido
+        if (a == "--seq" || a == "--threads" || a == "--mode" || a == "--speed" || a == "-h" || a == "--help") {
+            if (a == "--threads" || a == "--mode" || a == "--speed") ++i; // saltar valor
             continue;
         }
-        if (positionalCount == 0) {
-            // Puede ser N o ANCHOxALTO
+        if (pos < 2) {
             int w, h;
-            if (parse_resolution(a, w, h)) {
-                opts.width = w;
-                opts.height = h;
-            } else {
-                // Intentar N
+            if (parse_resolution(a, w, h)) { opts.width = w; opts.height = h; }
+            else {
                 int n = std::atoi(a.c_str());
-                if (n <= 0 || n > 200000) {
-                    std::cerr << "Error: N invalido. Usa un entero en 1..200000.\n";
-                    return false;
-                }
+                if (n <= 0 || n > 200000) { std::cerr << "N invalido (1..200000)\n"; return false; }
                 opts.nChars = n;
             }
-            positionalCount++;
-        } else if (positionalCount == 1) {
-            // Lo que no fue el primero, debe ser el segundo (resolución o N)
-            int w, h;
-            if (parse_resolution(a, w, h)) {
-                opts.width = w;
-                opts.height = h;
-            } else {
-                int n = std::atoi(a.c_str());
-                if (n <= 0 || n > 200000) {
-                    std::cerr << "Error: segundo argumento invalido. Esperaba N o ANCHOxALTO.\n";
-                    return false;
-                }
-                opts.nChars = n;
-            }
-            positionalCount++;
+            ++pos;
         } else {
-            std::cerr << "Error: demasiados argumentos posicionales.\n";
+            std::cerr << "Demasiados argumentos posicionales.\n";
             return false;
         }
     }
-
-    // 3) Validaciones defensivas adicionales
-    if (opts.width * 1LL * opts.height > 10000LL * 10000LL) {
-        std::cerr << "Error: resolucion demasiado grande.\n";
-        return false;
-    }
+    // defensivo
+    if (1LL * opts.width * opts.height > 10000LL * 10000LL) { std::cerr << "Resolucion gigante.\n"; return false; }
     if (opts.nChars > opts.width * opts.height) {
-        std::cerr << "Advertencia: N supera pixeles disponibles; ajustando N.\n";
+        std::cerr << "Advertencia: N > pixeles; ajustando N.\n";
         opts.nChars = opts.width * opts.height;
     }
-
-    // Verificar que la fuente exista (ejecución desde raíz del repo)
-    const std::string fontPath = "assets/fonts/Matrix-MZ4P.ttf";
-    if (!file_exists(fontPath)) {
-        std::cerr << "Error: no se encontro la fuente '" << fontPath
-                  << "'. Ejecuta el binario desde la raiz del proyecto.\n";
+    if (!file_exists("assets/fonts/Matrix-MZ4P.ttf")) {
+        std::cerr << "No se encontro assets/fonts/Matrix-MZ4P.ttf. Ejecuta desde la raiz.\n";
         return false;
     }
-
     return true;
 }
+// -------------------- FIN CLI --------------------
 
-
-
-
-static int run_loop(int N, unsigned width, unsigned height, bool vsync = true) {
-    sf::RenderWindow window(sf::VideoMode(width, height), "Matrix N caracteres"); // <-- aquí
-    if (vsync) window.setVerticalSyncEnabled(true);
-    else window.setFramerateLimit(60);
+static int run_loop(const CliOptions& opts, bool vsync = true) {
+    sf::RenderWindow window(sf::VideoMode(opts.width, opts.height), "Matrix N caracteres");
+    if (vsync) window.setVerticalSyncEnabled(true); else window.setFramerateLimit(60);
 
     sf::Font font;
     if (!font.loadFromFile("assets/fonts/Matrix-MZ4P.ttf")) {
-        std::cerr << "Error al cargar fuente en assets/fonts/Matrix-MZ4P.ttf\n";
-        return EXIT_FAILURE;
+        std::cerr << "Error cargando fuente.\n"; return EXIT_FAILURE;
     }
 
-    TextRender renderer(N, font, 24, window.getSize());
+    TextRender renderer(opts.nChars, font, 24, window.getSize(), opts.mode, opts.speed);
+    sf::Clock clock;
 
     while (window.isOpen()) {
         sf::Event e;
@@ -172,11 +143,14 @@ static int run_loop(int N, unsigned width, unsigned height, bool vsync = true) {
             if (e.type == sf::Event::Closed) window.close();
             if (e.type == sf::Event::KeyPressed && e.key.code == sf::Keyboard::Escape) window.close();
             if (e.type == sf::Event::Resized) {
-                sf::FloatRect visibleArea(0.f, 0.f, static_cast<float>(e.size.width), static_cast<float>(e.size.height));
-                window.setView(sf::View(visibleArea));
-                renderer.resize({e.size.width, e.size.height});
+                sf::FloatRect visible(0.f, 0.f, float(e.size.width), float(e.size.height));
+                window.setView(sf::View(visible));
+                renderer.resize({ e.size.width, e.size.height });
             }
         }
+
+        float dt = clock.restart().asSeconds();
+        renderer.update(dt);
 
         window.clear(sf::Color::Black);
         renderer.render(window);
@@ -185,28 +159,12 @@ static int run_loop(int N, unsigned width, unsigned height, bool vsync = true) {
     return EXIT_SUCCESS;
 }
 
-
-// Cuando avancemos vamos a cambiar esto
-static int run_sequential(const CliOptions& opts) {
-    return run_loop(opts.nChars, opts.width, opts.height);
-}
-static int run_parallel(const CliOptions& opts) {
-    // para la versión paralela, por el momento solo vamos a usar la secuencial
-    (void)opts.threads; // silenciar warning hasta implementar
-    return run_loop(opts.nChars, opts.width, opts.height);
-}
+// Por ahora iguales; aquí enchufas paralelismo real si lo necesitas
+static int run_sequential(const CliOptions& opts) { return run_loop(opts); }
+static int run_parallel  (const CliOptions& opts) { (void)opts.threads; return run_loop(opts); }
 
 int main(int argc, char** argv) {
     CliOptions opts;
-    if (!parse_cli(argc, argv, opts)) {
-        print_usage(argv[0]);
-        return EXIT_FAILURE;
-    }
-
-    // Usa SIEMPRE los valores validados
-    if (opts.forceSequential) {
-        return run_sequential(opts);
-    } else {
-        return run_parallel(opts);
-    }
+    if (!parse_cli(argc, argv, opts)) { print_usage(argv[0]); return EXIT_FAILURE; }
+    return opts.forceSequential ? run_sequential(opts) : run_parallel(opts);
 }
