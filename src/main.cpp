@@ -4,37 +4,38 @@
 #include <regex>
 #include <cstdlib>
 #include <filesystem>
-#include "TextRender.h"
+#include "TextRender.h"   // define MotionMode y Palette
 
 // -------------------- CLI --------------------
-enum class MotionMode; // ya viene de TextRender.h, pero evitamos warnings
-
 struct CliOptions {
     int nChars = 200;
     int width  = 800;
     int height = 600;
     bool forceSequential = false;
     int threads = 0;
-    MotionMode mode = MotionMode::Rain; // rain por defecto
-    float speed = 160.f;                // usado por rain/bounce
+    MotionMode mode = MotionMode::Rain;     // por defecto lluvia
+    float speed = 160.f;                    // px/s base (rain/bounce)
+    Palette palette = Palette::Mono;        // por defecto verde clásico
 };
 
 static void print_usage(const char* prog) {
     std::cout
         << "Uso: " << prog << " [opciones] [N] [ANCHOxALTO]\n\n"
         << "Posicionales:\n"
-        << "  N               Numero de caracteres (defecto: 200)\n"
-        << "  ANCHOxALTO      Resolucion, p.ej. 1024x768 (defecto: 800x600)\n\n"
+        << "  N                     Numero de caracteres (defecto: 200)\n"
+        << "  ANCHOxALTO            Resolucion, p.ej. 1024x768 (defecto: 800x600)\n\n"
         << "Opciones:\n"
         << "  --seq                 Fuerza modo secuencial\n"
         << "  --threads K           Sugerir K hilos (para paralelo futuro)\n"
-        << "  --mode rain|bounce|spiral   Modo de movimiento (defecto: rain)\n"
-        << "  --speed V             Velocidad base (px/s, defecto: 160)\n"
+        << "  --mode rain|bounce|spiral    Modo de movimiento (defecto: rain)\n"
+        << "  --palette mono|neon|rainbow  Paleta de color para rain (defecto: mono)\n"
+        << "  --speed V             Velocidad base en px/s (defecto: 160)\n"
         << "  -h, --help            Ayuda\n\n"
         << "Ejemplos:\n"
         << "  " << prog << "\n"
-        << "  " << prog << " 150 1024x768 --mode rain --speed 220\n"
-        << "  " << prog << " --mode bounce\n";
+        << "  " << prog << " 300 1280x720 --mode rain --speed 220 --palette neon\n"
+        << "  " << prog << " --mode bounce\n"
+        << "  " << prog << " 200 1024x768 --mode spiral\n";
 }
 
 static bool parse_resolution(const std::string& s, int& w, int& h) {
@@ -58,10 +59,7 @@ static bool parse_cli(int argc, char** argv, CliOptions& opts) {
     // ayuda
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "-h" || a == "--help") {
-            print_usage(argv[0]);
-            std::exit(0);
-        }
+        if (a == "-h" || a == "--help") { print_usage(argv[0]); std::exit(0); }
     }
     // opciones
     for (int i = 1; i < argc; ++i) {
@@ -82,6 +80,15 @@ static bool parse_cli(int argc, char** argv, CliOptions& opts) {
             else { std::cerr << "Error: --mode {rain|bounce|spiral}\n"; return false; }
             continue;
         }
+        if (a == "--palette") {
+            if (i + 1 >= argc) { std::cerr << "Error: --palette requiere valor.\n"; return false; }
+            std::string p = argv[++i];
+            if      (p == "mono")    opts.palette = Palette::Mono;
+            else if (p == "neon")    opts.palette = Palette::Neon;
+            else if (p == "rainbow") opts.palette = Palette::Rainbow;
+            else { std::cerr << "Error: --palette {mono|neon|rainbow}\n"; return false; }
+            continue;
+        }
         if (a == "--speed") {
             if (i + 1 >= argc) { std::cerr << "Error: --speed V\n"; return false; }
             float v = std::atof(argv[++i]);
@@ -89,12 +96,12 @@ static bool parse_cli(int argc, char** argv, CliOptions& opts) {
             opts.speed = v; continue;
         }
     }
-    // posicionales: N y ANCHOxALTO (en cualquier orden)
+    // posicionales: N y ANCHOxALTO (en cualquier orden, máx 2)
     int pos = 0;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--seq" || a == "--threads" || a == "--mode" || a == "--speed" || a == "-h" || a == "--help") {
-            if (a == "--threads" || a == "--mode" || a == "--speed") ++i; // saltar valor
+        if (a == "--seq" || a == "--threads" || a == "--mode" || a == "--palette" || a == "--speed" || a == "-h" || a == "--help") {
+            if (a == "--threads" || a == "--mode" || a == "--palette" || a == "--speed") ++i; // salta valor
             continue;
         }
         if (pos < 2) {
@@ -127,15 +134,19 @@ static bool parse_cli(int argc, char** argv, CliOptions& opts) {
 
 static int run_loop(const CliOptions& opts, bool vsync = true) {
     sf::RenderWindow window(sf::VideoMode(opts.width, opts.height), "Matrix N caracteres");
-    if (vsync) window.setVerticalSyncEnabled(true); else window.setFramerateLimit(60);
+    if (vsync) window.setVerticalSyncEnabled(true);
+    else window.setFramerateLimit(60);
 
     sf::Font font;
     if (!font.loadFromFile("assets/fonts/Matrix-MZ4P.ttf")) {
-        std::cerr << "Error cargando fuente.\n"; return EXIT_FAILURE;
+        std::cerr << "Error cargando fuente.\n"; 
+        return EXIT_FAILURE;
     }
 
-    TextRender renderer(opts.nChars, font, 24, window.getSize(), opts.mode, opts.speed);
-    sf::Clock clock;
+    TextRender renderer(opts.nChars, font, 24, window.getSize(),
+                        opts.mode, opts.speed, opts.palette);
+
+    sf::Clock clock; // delta-time
 
     while (window.isOpen()) {
         sf::Event e;
@@ -159,7 +170,7 @@ static int run_loop(const CliOptions& opts, bool vsync = true) {
     return EXIT_SUCCESS;
 }
 
-// Por ahora iguales; aquí enchufas paralelismo real si lo necesitas
+// Por ahora iguales; aquí puedes enchufar paralelismo real si lo necesitas
 static int run_sequential(const CliOptions& opts) { return run_loop(opts); }
 static int run_parallel  (const CliOptions& opts) { (void)opts.threads; return run_loop(opts); }
 

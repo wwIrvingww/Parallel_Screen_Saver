@@ -3,6 +3,7 @@
 #include <ctime>
 #include <cmath>
 #include <algorithm>
+#include <numeric> // std::accumulate
 
 // Aleatorio float
 static float frand(float a, float b) { return a + (b - a) * (float(std::rand()) / float(RAND_MAX)); }
@@ -12,15 +13,21 @@ TextRender::TextRender(int N,
                        unsigned int charSize,
                        sf::Vector2u windowSize,
                        MotionMode mode,
-                       float speed)
+                       float speed,
+                       Palette palette)
     : size_(windowSize),
       mode_(mode),
       speed_(speed),
-      charSize_(charSize)
+      charSize_(charSize),
+      palette_(palette)
 {
     std::srand(unsigned(std::time(nullptr)));
     if (mode_ == MotionMode::Rain) {
+        // Lluvia Matrix clásica (verde, infinita)
         initRain(std::max(1, N), font);
+        // Líneas punteadas que rebotan — 4..7 líneas, velocidades aleatorias
+        int dashCount = std::clamp(int(std::round(std::sqrt(float(std::max(1, N))) / 3.f)), 4, 7);
+        initDashes(font, dashCount);
     } else {
         initParticles(std::max(1, N), font);
     }
@@ -34,16 +41,13 @@ sf::Color TextRender::generatePseudoRandomColor(int seed) {
 
 void TextRender::update(float dt) {
     time_ += dt;
-    switch (mode_) {
-        case MotionMode::Bounce:
-            for (auto& p : ps) updateBounce(p, dt);
-            break;
-        case MotionMode::Spiral:
-            for (auto& p : ps) updateSpiral(p, dt);
-            break;
-        case MotionMode::Rain:
-            updateRain(dt);
-            break;
+    if (mode_ == MotionMode::Rain) {
+        updateRain(dt);
+        updateDashes(dt);
+    } else if (mode_ == MotionMode::Bounce) {
+        for (auto& p : ps) updateBounce(p, dt);
+    } else { // Spiral
+        for (auto& p : ps) updateSpiral(p, dt);
     }
 }
 
@@ -51,6 +55,8 @@ void TextRender::render(sf::RenderWindow& window) {
     if (mode_ == MotionMode::Rain) {
         for (auto& d : drops)
             for (auto& g : d.glyphs) window.draw(g);
+        for (auto& L : dashes)
+            for (auto& dot : L.dots) window.draw(dot);
     } else {
         for (auto& p : ps) window.draw(p.text);
     }
@@ -58,18 +64,21 @@ void TextRender::render(sf::RenderWindow& window) {
 
 void TextRender::resize(sf::Vector2u newSize) {
     size_ = newSize;
-    // En rain, reconstruimos columnas para ajustarnos al nuevo ancho/alto
     if (mode_ == MotionMode::Rain) {
-        // No necesitamos el font original porque sf::Text guarda referencia interna,
-        // pero para reconstruir tomamos el font de cualquier glifo ya creado
-        sf::Font const* f = nullptr;
+        // Re-construye lluvia y líneas para ajustarse al nuevo tamaño
+        const sf::Font* f = nullptr;
         if (!drops.empty() && !drops[0].glyphs.empty()) f = drops[0].glyphs[0].getFont();
-        if (f) initRain((int)std::accumulate(drops.begin(), drops.end(), 0,
-                     [](int acc, const Drop& d){ return acc + (int)d.glyphs.size(); }), *f);
+        if (!f && !dashes.empty() && !dashes[0].dots.empty()) f = dashes[0].dots[0].getFont();
+        if (f) {
+            int totalGlyphs = std::accumulate(drops.begin(), drops.end(), 0,
+                               [](int acc, const Drop& d){ return acc + (int)d.glyphs.size(); });
+            initRain(totalGlyphs, *f);
+            initDashes(*f, std::max(4, (int)dashes.size()));
+        }
     }
 }
 
-// -------------------- Init para bounce/spiral --------------------
+// -------------------- Init: bounce/spiral (sin cambios “Matrix”) --------------------
 void TextRender::initParticles(int N, const sf::Font& font) {
     ps.clear(); ps.reserve(N);
     const float minR = 20.f;
@@ -81,7 +90,6 @@ void TextRender::initParticles(int N, const sf::Font& font) {
         p.text.setString((std::rand() % 2) ? "1" : "0");
         p.baseSize = float(charSize_);
         p.text.setCharacterSize(unsigned(p.baseSize));
-        // En modos no-rain mantenemos colores variados
         p.text.setFillColor(generatePseudoRandomColor(i));
 
         p.pos = { frand(0.f, float(size_.x)), frand(0.f, float(size_.y)) };
@@ -102,7 +110,7 @@ void TextRender::initParticles(int N, const sf::Font& font) {
     }
 }
 
-// -------------------- Init para lluvia Matrix --------------------
+// -------------------- Init: lluvia Matrix (clásica, verde, infinita) --------------------
 void TextRender::initRain(int approxTotalGlyphs, const sf::Font& font) {
     drops.clear();
 
@@ -120,7 +128,6 @@ void TextRender::initRain(int approxTotalGlyphs, const sf::Font& font) {
     for (int c = 0; c < cols; ++c) {
         Drop d{};
         d.x = (c + 0.5f) * cellW;
-        d.speed = frand(speed_ * 0.6f, speed_ * 1.4f);
         d.spacing = spacing;
 
         int len = std::max(6, int(avgLen * frand(0.7f, 1.4f)));
@@ -129,22 +136,21 @@ void TextRender::initRain(int approxTotalGlyphs, const sf::Font& font) {
 
         const float H = float(size_.y);
         const float tail = (len - 1) * d.spacing;
-        const float period = H + tail + d.spacing;
 
-        // Reparte las columnas ya en su ciclo (lluvia “poblada” desde el inicio)
+        // cabeza en un punto del ciclo [-tail, H]
         d.headY = frand(-tail, H);
 
         for (int i = 0; i < len; ++i) {
             char ch = alphabet_[std::rand() % alphabet_.size()];
             sf::Text g(std::string(1, ch), font, charSize_);
             if (i == 0) {
-                g.setFillColor(headColor());             // cabeza brillante
+                g.setFillColor(headColor()); // cabeza
             } else {
-                float t = float(i) / float(len);         // desvanecimiento cola
+                float t = float(i) / float(len);
                 unsigned char a = (unsigned char)std::clamp(255 - int(255 * t * 1.2f), 40, 255);
-                g.setFillColor(neonGreen(a));
+                g.setFillColor(neonGreen(a)); // cola verde
             }
-            float y = d.headY - i * d.spacing;           // pos inicial (el wrap lo hace updateRain)
+            float y = d.headY - i * d.spacing;
             g.setPosition(d.x, y);
             d.glyphs.push_back(std::move(g));
         }
@@ -153,15 +159,16 @@ void TextRender::initRain(int approxTotalGlyphs, const sf::Font& font) {
     }
 }
 
-
-// -------------------- Update: Rain --------------------
+// -------------------- Update: lluvia Matrix (wrap vertical infinito) --------------------
 void TextRender::updateRain(float dt) {
     const float H = float(size_.y);
 
     for (size_t k = 0; k < drops.size(); ++k) {
         Drop& d = drops[k];
 
-        d.headY += d.speed * dt;
+        // Avanza la cabeza hacia abajo a velocidad base (derivada de speed_)
+        float headSpeed = std::max(80.f, speed_); // px/s
+        d.headY += headSpeed * dt;
 
         const int len = (int)d.glyphs.size();
         if (len <= 0) continue;
@@ -170,42 +177,114 @@ void TextRender::updateRain(float dt) {
         const float period = H + tail + d.spacing;
 
         bool flicker = (std::rand() % 6 == 0);
-        float wobble = std::sin(time_ * 2.f + float(k) * 0.37f) * 1.1f;
 
         for (int i = 0; i < len; ++i) {
+            // y conceptual
             float y = d.headY - i * d.spacing;
 
-            // Wrap continuo en el rango [-tail, H]
+            // Wrap continuo para no dejar huecos
             float yWrapped = std::fmod(y + period, period);
             if (yWrapped < 0.f) yWrapped += period;
             y = yWrapped - tail;
-
-            d.glyphs[i].setPosition(d.x + wobble, y);
 
             if (flicker && (std::rand() % 10 == 0)) {
                 char ch = alphabet_[std::rand() % alphabet_.size()];
                 d.glyphs[i].setString(std::string(1, ch));
             }
+
+            // cabeza: sutil pulso
             if (i == 0) {
                 sf::Color c = headColor();
                 c.a = (unsigned char)std::clamp(200 + int(55 * std::sin(time_ * 6.f + k)), 160, 255);
                 d.glyphs[i].setFillColor(c);
             }
+
+            d.glyphs[i].setPosition(d.x, y);
         }
 
-        // Si la cabeza se pasó, ajusta en un solo paso (sin while infinito)
-        const float limit = H + d.spacing + tail;
-        if (d.headY > limit) {
-            const float over = d.headY - limit;
-            const float steps = std::floor(over / period) + 1.f;
+        // Por si la cabeza se pasó varios periodos en un frame largo
+        if (d.headY > H + tail + d.spacing) {
+            float over = d.headY - (H + tail + d.spacing);
+            float steps = std::floor(over / period) + 1.f;
             d.headY -= steps * period;
-            d.speed = frand(speed_ * 0.6f, speed_ * 1.4f);
+        }
+    }
+}
+
+// -------------------- Init: líneas punteadas --------------------
+void TextRender::initDashes(const sf::Font& font, int count) {
+    dashes.clear();
+    dashes.reserve(count);
+
+    // Puntos más pequeños que los dígitos para que se sientan "líneas"
+    unsigned int dotCharSize = std::max(10u, charSize_ / 2);
+
+    sf::Text probe(".", font, dotCharSize);
+    float dotW = probe.getLocalBounds().width;
+    if (dotW <= 0.f) dotW = dotCharSize * 0.45f;
+
+    for (int k = 0; k < count; ++k) {
+        DashLine L{};
+        L.dotWidth = dotW;
+        L.spacing  = std::max(8.f, dotW * 1.8f);
+
+        // Largo objetivo del segmento: 12%–28% del ancho (¡no toda la pantalla!)
+        float frac     = frand(0.12f, 0.28f);
+        float targetW  = std::max(120.f, float(size_.x) * frac);
+        int   nDots    = std::max(5, int(std::round(targetW / L.spacing)));
+        float totalW   = (nDots - 1) * L.spacing + L.dotWidth;
+
+        // Altura y tiempo objetivo para cruzar de lado a lado
+        L.y = frand(dotCharSize * 1.2f, float(size_.y) - dotCharSize * 1.8f);
+        float travel = std::max(50.f, float(size_.x) - totalW); // recorrido real
+        float T      = frand(2.5f, 5.0f);                       // segundos por cruce
+        float vxMag  = travel / T;                              // px/s
+        L.vx         = ((std::rand() % 2) ? vxMag : -vxMag);    // dirección aleatoria
+
+        // Posición inicial dentro del rango útil
+        L.xLeft = frand(0.f, float(size_.x) - totalW);
+
+        // Construye los puntos
+        L.dots.reserve(nDots);
+        for (int i = 0; i < nDots; ++i) {
+            sf::Text dot(".", font, dotCharSize);
+            sf::Color c = neonGreen(220);
+            if (i % 2 == 1) c.a = 180; // alterna un poco el alpha para más "dashy"
+            dot.setFillColor(c);
+            dot.setPosition(L.xLeft + i * L.spacing, L.y);
+            L.dots.push_back(std::move(dot));
+        }
+
+        dashes.push_back(std::move(L));
+    }
+}
+
+
+// -------------------- Update: líneas punteadas (rebote horizontal) --------------------
+void TextRender::updateDashes(float dt) {
+    for (auto& L : dashes) {
+        L.xLeft += L.vx * dt;
+
+        const int n = (int)L.dots.size();
+        if (n == 0) continue;
+
+        float totalW    = (n - 1) * L.spacing + L.dotWidth;
+        float leftBound  = 0.f;
+        float rightBound = std::max(0.f, float(size_.x) - totalW);
+
+        // Rebote en bordes: invierte vx y clampa la posición
+        if (L.xLeft < leftBound)  { L.xLeft = leftBound;  L.vx =  std::fabs(L.vx); }
+        if (L.xLeft > rightBound) { L.xLeft = rightBound; L.vx = -std::fabs(L.vx); }
+
+        // Actualiza posiciones de los puntos
+        for (int i = 0; i < n; ++i) {
+            L.dots[i].setPosition(L.xLeft + i * L.spacing, L.y);
         }
     }
 }
 
 
-// -------------------- Update: Bounce --------------------
+// -------------------- Update: Bounce (otros modos) --------------------
 void TextRender::updateBounce(Particle& p, float dt) {
     p.pos += p.vel * dt;
 
@@ -224,7 +303,7 @@ void TextRender::updateBounce(Particle& p, float dt) {
     p.text.setPosition(p.pos);
 }
 
-// -------------------- Update: Spiral --------------------
+// -------------------- Update: Spiral (otros modos) --------------------
 void TextRender::updateSpiral(Particle& p, float dt) {
     p.angle += p.angVel * dt;
     const float r = p.baseRadius + p.radiusAmp * std::sin(p.phase + p.angle * 0.9f);
