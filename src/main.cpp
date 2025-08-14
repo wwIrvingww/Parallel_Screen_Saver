@@ -6,6 +6,11 @@
 #include <filesystem>
 #include "TextRender.h"   // define MotionMode y Palette
 
+#ifdef _OPENMP
+  #include <omp.h>
+#endif
+
+
 // -------------------- CLI --------------------
 struct CliOptions {
     int nChars = 200;
@@ -170,9 +175,14 @@ static int run_loop(const CliOptions& opts, bool vsync = true) {
     return EXIT_SUCCESS;
 }
 
-// Por ahora iguales; aquí puedes enchufar paralelismo real si lo necesitas
 static int run_sequential(const CliOptions& opts) { return run_loop(opts); }
-static int run_parallel  (const CliOptions& opts) { (void)opts.threads; return run_loop(opts); }
+
+static int run_parallel(const CliOptions& opts) {
+    #ifdef _OPENMP
+        if (opts.threads > 0) omp_set_num_threads(opts.threads);
+    #endif
+        return run_loop(opts);
+}
 
 int main(int argc, char** argv) {
     CliOptions opts;

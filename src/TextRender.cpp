@@ -5,6 +5,10 @@
 #include <algorithm>
 #include <numeric> // std::accumulate
 
+#ifdef _OPENMP
+  #include <omp.h>
+#endif
+
 // Aleatorio float
 static float frand(float a, float b) { return a + (b - a) * (float(std::rand()) / float(RAND_MAX)); }
 
@@ -45,8 +49,10 @@ void TextRender::update(float dt) {
         updateRain(dt);
         updateDashes(dt);
     } else if (mode_ == MotionMode::Bounce) {
+        #pragma omp parallel for schedule(static)
         for (auto& p : ps) updateBounce(p, dt);
     } else { // Spiral
+        #pragma omp parallel for schedule(static)
         for (auto& p : ps) updateSpiral(p, dt);
     }
 }
@@ -163,6 +169,9 @@ void TextRender::initRain(int approxTotalGlyphs, const sf::Font& font) {
 void TextRender::updateRain(float dt) {
     const float H = float(size_.y);
 
+    const int frame = int(time_ * 60.0f);
+
+    #pragma omp parallel for schedule(static)
     for (size_t k = 0; k < drops.size(); ++k) {
         Drop& d = drops[k];
 
@@ -176,7 +185,7 @@ void TextRender::updateRain(float dt) {
         const float tail = (len - 1) * d.spacing;
         const float period = H + tail + d.spacing;
 
-        bool flicker = (std::rand() % 6 == 0);
+        const bool flicker = ((frame + k) % 6 == 0);
 
         for (int i = 0; i < len; ++i) {
             // y conceptual
@@ -187,9 +196,10 @@ void TextRender::updateRain(float dt) {
             if (yWrapped < 0.f) yWrapped += period;
             y = yWrapped - tail;
 
-            if (flicker && (std::rand() % 10 == 0)) {
-                char ch = alphabet_[std::rand() % alphabet_.size()];
-                d.glyphs[i].setString(std::string(1, ch));
+            if (flicker && ((frame + i*13 + k*7) % 10 == 0)) {
+                unsigned seed = (unsigned)(frame * 2654435761u) ^ (unsigned)(k * 97531) ^ (unsigned)(i * 12345);
+                const size_t idx = seed % alphabet_.size();
+                d.glyphs[i].setString(std::string(1, alphabet_[idx]));
             }
 
             // cabeza: sutil pulso
@@ -262,7 +272,10 @@ void TextRender::initDashes(const sf::Font& font, int count) {
 
 // -------------------- Update: líneas punteadas (rebote horizontal) --------------------
 void TextRender::updateDashes(float dt) {
-    for (auto& L : dashes) {
+    #pragma omp parallel for schedule(static)
+    for (int li = 0; li < (int)dashes.size(); ++li) {
+        DashLine& L = dashes[li];
+        
         L.xLeft += L.vx * dt;
 
         const int n = (int)L.dots.size();
