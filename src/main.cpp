@@ -180,8 +180,31 @@ static int run_sequential(const CliOptions& opts) { return run_loop(opts); }
 static int run_parallel(const CliOptions& opts) {
     #ifdef _OPENMP
         if (opts.threads > 0) omp_set_num_threads(opts.threads);
+
+        // Sincronización inicial
+        #pragma omp parallel
+        {
+            #pragma omp single
+            {
+                std::cout << "Iniciando ejecución paralela con " << omp_get_num_threads() << " hilos.\n";
+            }
+        }
     #endif
-        return run_loop(opts);
+
+    // Ejecutar el bucle principal con sincronización
+    int result;
+    #pragma omp parallel
+    {
+        #pragma omp single
+        {
+            result = run_loop(opts);
+        }
+
+        // Barrera para sincronizar hilos antes de finalizar
+        #pragma omp barrier
+    }
+
+    return result;
 }
 
 int main(int argc, char** argv) {

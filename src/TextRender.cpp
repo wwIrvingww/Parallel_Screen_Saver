@@ -168,16 +168,17 @@ void TextRender::initRain(int approxTotalGlyphs, const sf::Font& font) {
 // -------------------- Update: lluvia Matrix (wrap vertical infinito) --------------------
 void TextRender::updateRain(float dt) {
     const float H = float(size_.y);
-
     const int frame = int(time_ * 60.0f);
 
     #pragma omp parallel for schedule(static)
     for (size_t k = 0; k < drops.size(); ++k) {
         Drop& d = drops[k];
 
-        // Avanza la cabeza hacia abajo a velocidad base (derivada de speed_)
-        float headSpeed = std::max(80.f, speed_); // px/s
-        d.headY += headSpeed * dt;
+        // Sección crítica para proteger modificaciones compartidas
+        #pragma omp critical
+        {
+            d.headY += std::max(80.f, speed_) * dt;
+        }
 
         const int len = (int)d.glyphs.size();
         if (len <= 0) continue;
@@ -185,34 +186,15 @@ void TextRender::updateRain(float dt) {
         const float tail = (len - 1) * d.spacing;
         const float period = H + tail + d.spacing;
 
-        const bool flicker = ((frame + k) % 6 == 0);
-
         for (int i = 0; i < len; ++i) {
-            // y conceptual
             float y = d.headY - i * d.spacing;
-
-            // Wrap continuo para no dejar huecos
             float yWrapped = std::fmod(y + period, period);
             if (yWrapped < 0.f) yWrapped += period;
             y = yWrapped - tail;
 
-            if (flicker && ((frame + i*13 + k*7) % 10 == 0)) {
-                unsigned seed = (unsigned)(frame * 2654435761u) ^ (unsigned)(k * 97531) ^ (unsigned)(i * 12345);
-                const size_t idx = seed % alphabet_.size();
-                d.glyphs[i].setString(std::string(1, alphabet_[idx]));
-            }
-
-            // cabeza: sutil pulso
-            if (i == 0) {
-                sf::Color c = headColor();
-                c.a = (unsigned char)std::clamp(200 + int(55 * std::sin(time_ * 6.f + k)), 160, 255);
-                d.glyphs[i].setFillColor(c);
-            }
-
             d.glyphs[i].setPosition(d.x, y);
         }
 
-        // Por si la cabeza se pasó varios periodos en un frame largo
         if (d.headY > H + tail + d.spacing) {
             float over = d.headY - (H + tail + d.spacing);
             float steps = std::floor(over / period) + 1.f;
@@ -299,7 +281,10 @@ void TextRender::updateDashes(float dt) {
 
 // -------------------- Update: Bounce (otros modos) --------------------
 void TextRender::updateBounce(Particle& p, float dt) {
-    p.pos += p.vel * dt;
+    #pragma omp critical
+    {
+        p.pos += p.vel * dt;
+    }
 
     const sf::FloatRect bounds = p.text.getLocalBounds();
     const float w = bounds.width, h = bounds.height;
