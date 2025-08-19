@@ -4,12 +4,24 @@
 #include <regex>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <chrono>
+#include <iomanip>
 #include "TextRender.h"   // define MotionMode y Palette
 
 #ifdef _OPENMP
   #include <omp.h>
 #endif
 
+// Helper para imprimir el modo en el CSV
+static const char* mode_to_cstr(MotionMode m) {
+    switch (m) {
+        case MotionMode::Rain:   return "rain";
+        case MotionMode::Bounce: return "bounce";
+        case MotionMode::Spiral: return "spiral";
+    }
+    return "unknown";
+}
 
 // -------------------- CLI --------------------
 struct CliOptions {
@@ -21,6 +33,10 @@ struct CliOptions {
     MotionMode mode = MotionMode::Rain;     // por defecto lluvia
     float speed = 160.f;                    // px/s base (rain/bounce)
     Palette palette = Palette::Mono;        // por defecto verde clásico
+
+    // Benchmark
+    std::string benchPath;  // ruta CSV; vacío = deshabilitado
+    int benchFrames = 0;    // 0 = no limitar; >0 = detener tras K frames
 };
 
 static void print_usage(const char* prog) {
@@ -35,12 +51,15 @@ static void print_usage(const char* prog) {
         << "  --mode rain|bounce|spiral    Modo de movimiento (defecto: rain)\n"
         << "  --palette mono|neon|rainbow  Paleta de color para rain (defecto: mono)\n"
         << "  --speed V             Velocidad base en px/s (defecto: 160)\n"
+        << "  --bench FILE          Registrar tiempos por frame en CSV\n"
+        << "  --bench-frames K      Detener tras K frames (para mediciones)\n"
         << "  -h, --help            Ayuda\n\n"
         << "Ejemplos:\n"
         << "  " << prog << "\n"
         << "  " << prog << " 300 1280x720 --mode rain --speed 220 --palette neon\n"
         << "  " << prog << " --mode bounce\n"
-        << "  " << prog << " 200 1024x768 --mode spiral\n";
+        << "  " << prog << " 200 1024x768 --mode spiral\n"
+        << "  " << prog << " --seq --bench out.csv --bench-frames 300\n";
 }
 
 static bool parse_resolution(const std::string& s, int& w, int& h) {
@@ -100,13 +119,27 @@ static bool parse_cli(int argc, char** argv, CliOptions& opts) {
             if (v <= 0.f || v > 5000.f) { std::cerr << "Error: --speed 1..5000\n"; return false; }
             opts.speed = v; continue;
         }
+        if (a == "--bench") {
+            if (i + 1 >= argc) { std::cerr << "Error: --bench FILE\n"; return false; }
+            opts.benchPath = argv[++i];
+            continue;
+        }
+        if (a == "--bench-frames") {
+            if (i + 1 >= argc) { std::cerr << "Error: --bench-frames K\n"; return false; }
+            int k = std::atoi(argv[++i]);
+            if (k <= 0) { std::cerr << "Error: --bench-frames debe ser > 0\n"; return false; }
+            opts.benchFrames = k;
+            continue;
+        }
     }
     // posicionales: N y ANCHOxALTO (en cualquier orden, máx 2)
     int pos = 0;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--seq" || a == "--threads" || a == "--mode" || a == "--palette" || a == "--speed" || a == "-h" || a == "--help") {
-            if (a == "--threads" || a == "--mode" || a == "--palette" || a == "--speed") ++i; // salta valor
+        if (a == "--seq" || a == "--threads" || a == "--mode" || a == "--palette" || a == "--speed"
+            || a == "--bench" || a == "--bench-frames" || a == "-h" || a == "--help") {
+            if (a == "--threads" || a == "--mode" || a == "--palette" || a == "--speed"
+                || a == "--bench" || a == "--bench-frames") ++i; // salta valor
             continue;
         }
         if (pos < 2) {
@@ -138,6 +171,9 @@ static bool parse_cli(int argc, char** argv, CliOptions& opts) {
 // -------------------- FIN CLI --------------------
 
 static int run_loop(const CliOptions& opts, bool vsync = true) {
+    namespace fs = std::filesystem;
+    using clock_t = std::chrono::steady_clock;
+
     sf::RenderWindow window(sf::VideoMode(opts.width, opts.height), "Matrix N caracteres");
     if (vsync) window.setVerticalSyncEnabled(true);
     else window.setFramerateLimit(60);
@@ -151,7 +187,23 @@ static int run_loop(const CliOptions& opts, bool vsync = true) {
     TextRender renderer(opts.nChars, font, 24, window.getSize(),
                         opts.mode, opts.speed, opts.palette);
 
-    sf::Clock clock; // delta-time
+    // Benchmark: abrir CSV si se pidió
+    std::ofstream benchOut;
+    const bool benchEnabled = !opts.benchPath.empty();
+    if (benchEnabled) {
+        bool newFile = !fs::exists(opts.benchPath);
+        benchOut.open(opts.benchPath, std::ios::app);
+        if (!benchOut) {
+            std::cerr << "No pude abrir " << opts.benchPath << " para escribir.\n";
+            return EXIT_FAILURE;
+        }
+        if (newFile) {
+            benchOut << "mode,threads,width,height,N,speed,frame,dt_s,update_ms,render_ms,total_ms,fps\n";
+        }
+    }
+
+    sf::Clock dtClock;
+    int frame = 0;
 
     while (window.isOpen()) {
         sf::Event e;
@@ -165,13 +217,47 @@ static int run_loop(const CliOptions& opts, bool vsync = true) {
             }
         }
 
-        float dt = clock.restart().asSeconds();
+        float dt = dtClock.restart().asSeconds();
+
+        auto t0 = clock_t::now();
         renderer.update(dt);
+        auto t1 = clock_t::now();
 
         window.clear(sf::Color::Black);
         renderer.render(window);
         window.display();
+
+        auto t2 = clock_t::now();
+
+        // Métricas
+        double update_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        double render_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+        double total_ms  = std::chrono::duration<double, std::milli>(t2 - t0).count();
+        double fps       = (dt > 0.0f) ? (1.0 / dt) : 0.0;
+
+        if (benchEnabled) {
+            benchOut << mode_to_cstr(opts.mode) << ','
+                     << opts.threads << ','
+                     << opts.width << ','
+                     << opts.height << ','
+                     << opts.nChars << ','
+                     << std::fixed << std::setprecision(3) << opts.speed << ','
+                     << frame << ','
+                     << std::setprecision(6) << dt << ','
+                     << std::setprecision(3) << update_ms << ','
+                     << render_ms << ','
+                     << total_ms << ','
+                     << std::setprecision(2) << fps
+                     << '\n';
+        }
+
+        ++frame;
+        if (opts.benchFrames > 0 && frame >= opts.benchFrames) {
+            window.close(); // salida automática para benchmarks
+        }
     }
+
+    if (benchEnabled) benchOut.close();
     return EXIT_SUCCESS;
 }
 
