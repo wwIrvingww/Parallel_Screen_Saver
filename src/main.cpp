@@ -187,6 +187,13 @@ static int run_loop(const CliOptions& opts, bool vsync = true) {
     TextRender renderer(opts.nChars, font, 24, window.getSize(),
                         opts.mode, opts.speed, opts.palette);
 
+    #ifdef _OPENMP
+        int threads_eff = omp_get_max_threads();
+    #else
+        int threads_eff = 1;
+    #endif
+        const char* exec = opts.forceSequential ? "seq" : "omp";
+
     // Benchmark: abrir CSV si se pidió
     std::ofstream benchOut;
     const bool benchEnabled = !opts.benchPath.empty();
@@ -198,7 +205,7 @@ static int run_loop(const CliOptions& opts, bool vsync = true) {
             return EXIT_FAILURE;
         }
         if (newFile) {
-            benchOut << "mode,threads,width,height,N,speed,frame,dt_s,update_ms,render_ms,total_ms,fps\n";
+            benchOut << "exec,mode,threads_req,threads_eff,width,height,N,speed,frame,dt_s,update_ms,render_ms,total_ms,fps\n";
         }
     }
 
@@ -236,19 +243,22 @@ static int run_loop(const CliOptions& opts, bool vsync = true) {
         double fps       = (dt > 0.0f) ? (1.0 / dt) : 0.0;
 
         if (benchEnabled) {
-            benchOut << mode_to_cstr(opts.mode) << ','
-                     << opts.threads << ','
-                     << opts.width << ','
-                     << opts.height << ','
-                     << opts.nChars << ','
-                     << std::fixed << std::setprecision(3) << opts.speed << ','
-                     << frame << ','
-                     << std::setprecision(6) << dt << ','
-                     << std::setprecision(3) << update_ms << ','
-                     << render_ms << ','
-                     << total_ms << ','
-                     << std::setprecision(2) << fps
-                     << '\n';
+            benchOut    << exec << ','
+                        << mode_to_cstr(opts.mode) << ','
+                        << opts.threads << ','
+                        << threads_eff << ','
+                        << opts.width << ','
+                        << opts.height << ','
+                        << opts.nChars << ','
+                        << std::fixed << std::setprecision(3) << opts.speed << ','
+                        << frame << ','
+                        << std::setprecision(6) << dt << ','
+                        << std::setprecision(3) << update_ms << ','
+                        << render_ms << ','
+                        << total_ms << ','
+                        << std::setprecision(2) << fps
+                        << '\n';
+
         }
 
         ++frame;
