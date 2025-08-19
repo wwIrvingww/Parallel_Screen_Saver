@@ -71,18 +71,22 @@ void TextRender::render(sf::RenderWindow& window) {
 void TextRender::resize(sf::Vector2u newSize) {
     size_ = newSize;
     if (mode_ == MotionMode::Rain) {
-        // Re-construye lluvia y líneas para ajustarse al nuevo tamaño
         const sf::Font* f = nullptr;
         if (!drops.empty() && !drops[0].glyphs.empty()) f = drops[0].glyphs[0].getFont();
         if (!f && !dashes.empty() && !dashes[0].dots.empty()) f = dashes[0].dots[0].getFont();
         if (f) {
-            int totalGlyphs = std::accumulate(drops.begin(), drops.end(), 0,
-                               [](int acc, const Drop& d){ return acc + (int)d.glyphs.size(); });
+            int totalGlyphs = 0;
+            #pragma omp parallel for reduction(+:totalGlyphs) schedule(static)
+            for (int k = 0; k < (int)drops.size(); ++k) {
+                totalGlyphs += (int)drops[k].glyphs.size();
+            }
+
             initRain(totalGlyphs, *f);
             initDashes(*f, std::max(4, (int)dashes.size()));
         }
     }
 }
+
 
 // -------------------- Init: bounce/spiral (sin cambios “Matrix”) --------------------
 void TextRender::initParticles(int N, const sf::Font& font) {
@@ -165,43 +169,79 @@ void TextRender::initRain(int approxTotalGlyphs, const sf::Font& font) {
     }
 }
 
-// -------------------- Update: lluvia Matrix (wrap vertical infinito) --------------------
 void TextRender::updateRain(float dt) {
     const float H = float(size_.y);
     const int frame = int(time_ * 60.0f);
 
+    // 1) Avanza la cabeza de cada columna (independiente por drop)
     #pragma omp parallel for schedule(static)
-    for (size_t k = 0; k < drops.size(); ++k) {
-        Drop& d = drops[k];
+    for (int k = 0; k < (int)drops.size(); ++k) {
+        drops[k].headY += std::max(80.f, speed_) * dt;
+    }
 
-        // Sección crítica para proteger modificaciones compartidas
-        #pragma omp critical
-        {
-            d.headY += std::max(80.f, speed_) * dt;
-        }
+    // 2) Tamaño rectangular para collapse(2): max longitud de cola
+    int maxLen = 0;
+    #pragma omp parallel for reduction(max:maxLen) schedule(static)
+    for (int k = 0; k < (int)drops.size(); ++k) {
+        int len = (int)drops[k].glyphs.size();
+        if (len > maxLen) maxLen = len;
+    }
 
-        const int len = (int)d.glyphs.size();
-        if (len <= 0) continue;
+    // 3) Posicionar TODOS los glifos con collapse(2); guardamos los "huecos"
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int k = 0; k < (int)drops.size(); ++k) {
+        for (int i = 0; i < maxLen; ++i) {
+            if (i >= (int)drops[k].glyphs.size()) continue; // fuera del tamaño real
+            Drop& d = drops[k];
 
-        const float tail = (len - 1) * d.spacing;
-        const float period = H + tail + d.spacing;
+            const int len = (int)d.glyphs.size();
+            const float tail   = (len - 1) * d.spacing;
+            const float period = H + tail + d.spacing;
 
-        for (int i = 0; i < len; ++i) {
+            // y conceptual + wrap continuo
             float y = d.headY - i * d.spacing;
             float yWrapped = std::fmod(y + period, period);
             if (yWrapped < 0.f) yWrapped += period;
             y = yWrapped - tail;
 
+            // "flicker" determinista (evita RNG compartido en paralelo)
+            bool flickCol = (((unsigned)k*73856093u ^ (unsigned)frame*19349663u) & 7u) == 0u;   // ~1/8
+            bool flickGly = (((unsigned)i*83492791u ^ (unsigned)frame*2971215073u) % 10) == 0u; // ~1/10
+            if (flickCol && flickGly) {
+                char ch = alphabet_[(k + i + frame) % (int)alphabet_.size()];
+                d.glyphs[i].setString(std::string(1, ch));
+            }
+
+            // pulso leve en cabeza
+            if (i == 0) {
+                sf::Color c = headColor();
+                c.a = (unsigned char)std::clamp(200 + int(55 * std::sin(time_ * 6.f + k)), 160, 255);
+                d.glyphs[i].setFillColor(c);
+            }
+
             d.glyphs[i].setPosition(d.x, y);
         }
+    }
 
-        if (d.headY > H + tail + d.spacing) {
-            float over = d.headY - (H + tail + d.spacing);
+    // 4) Ajuste de headY si se pasó varios periodos (por drop)
+    #pragma omp parallel for schedule(static)
+    for (int k = 0; k < (int)drops.size(); ++k) {
+        Drop& d = drops[k];
+        const int len = (int)d.glyphs.size();
+        if (len <= 0) continue;
+
+        const float tail   = (len - 1) * d.spacing;
+        const float period = H + tail + d.spacing;
+        const float limit  = H + tail + d.spacing;
+
+        if (d.headY > limit) {
+            float over  = d.headY - limit;
             float steps = std::floor(over / period) + 1.f;
             d.headY -= steps * period;
         }
     }
 }
+
 
 // -------------------- Init: líneas punteadas --------------------
 void TextRender::initDashes(const sf::Font& font, int count) {
@@ -251,13 +291,12 @@ void TextRender::initDashes(const sf::Font& font, int count) {
     }
 }
 
-
-// -------------------- Update: líneas punteadas (rebote horizontal) --------------------
 void TextRender::updateDashes(float dt) {
+    // 1) Avanza cada línea y rebota (independiente)
     #pragma omp parallel for schedule(static)
     for (int li = 0; li < (int)dashes.size(); ++li) {
         DashLine& L = dashes[li];
-        
+
         L.xLeft += L.vx * dt;
 
         const int n = (int)L.dots.size();
@@ -267,16 +306,29 @@ void TextRender::updateDashes(float dt) {
         float leftBound  = 0.f;
         float rightBound = std::max(0.f, float(size_.x) - totalW);
 
-        // Rebote en bordes: invierte vx y clampa la posición
         if (L.xLeft < leftBound)  { L.xLeft = leftBound;  L.vx =  std::fabs(L.vx); }
         if (L.xLeft > rightBound) { L.xLeft = rightBound; L.vx = -std::fabs(L.vx); }
+    }
 
-        // Actualiza posiciones de los puntos
-        for (int i = 0; i < n; ++i) {
+    // 2) Rectángulo para collapse: máximo número de puntos en una línea
+    int maxDots = 0;
+    #pragma omp parallel for reduction(max:maxDots) schedule(static)
+    for (int li = 0; li < (int)dashes.size(); ++li) {
+        int n = (int)dashes[li].dots.size();
+        if (n > maxDots) maxDots = n;
+    }
+
+    // 3) Posiciona todos los puntos con collapse(2)
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int li = 0; li < (int)dashes.size(); ++li) {
+        for (int i = 0; i < maxDots; ++i) {
+            if (i >= (int)dashes[li].dots.size()) continue;
+            DashLine& L = dashes[li];
             L.dots[i].setPosition(L.xLeft + i * L.spacing, L.y);
         }
     }
 }
+
 
 
 // -------------------- Update: Bounce (otros modos) --------------------
