@@ -3,6 +3,7 @@
 #include <vector>
 #include <random>
 #include <string>
+#include <mutex>
 
 // Mantenemos estos enums para ser compatibles con tu main actual
 enum class MotionMode { Bounce, Spiral, Rain };
@@ -62,10 +63,18 @@ private:
     float time_ = 0.f;
     std::string alphabet_ = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     Palette palette_; // ignorado en Rain (usamos verde clásico)
+    
+    // Thread-safe random number generation
+    mutable std::mutex rng_mutex_;
+    mutable std::mt19937 rng_;
 
     // Helpers color Matrix
     sf::Color neonGreen(unsigned char a = 255) const { return sf::Color(0, 255, 70, a); }
     sf::Color headColor() const { return sf::Color(230, 255, 230); } // cabeza casi blanca
+
+    // Thread-safe random number generation
+    float threadSafeRand(float min, float max) const;
+    int threadSafeRandInt(int min, int max) const;
 
     // Generador (para otros modos)
     sf::Color generatePseudoRandomColor(int seed);

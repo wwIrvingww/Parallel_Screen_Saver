@@ -62,7 +62,7 @@ Creamos un .sh que compila y ejecuta automaticamente el archivo.
 Usa el script de ejemplo (desde la raíz del proyecto):
 
 ```bash
-chmod +x examples/run_screensaver.sh
+chmod +x example/run_screensaver.sh
 ./examples/run_screensaver.sh [N] [ANCHOxALTO]
 ```
 
@@ -73,10 +73,10 @@ Ejemplos:
 
 ```bash
 # 150 caracteres en 1024×768
-./examples/run_screensaver.sh 150 1024x768
+./example/run_screensaver.sh 150 1024x768
 
 # Valores por defecto
-./examples/run_screensaver.sh
+./example/run_screensaver.sh
 ```
 
 El script recompila automáticamente y luego lanza el programa **desde la raíz** para que encuentre `assets/fonts/Matrix-MZ4P.ttf`.

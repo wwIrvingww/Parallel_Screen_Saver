@@ -12,6 +12,18 @@
 // Aleatorio float
 static float frand(float a, float b) { return a + (b - a) * (float(std::rand()) / float(RAND_MAX)); }
 
+float TextRender::threadSafeRand(float min, float max) const {
+    std::lock_guard<std::mutex> lock(rng_mutex_);
+    std::uniform_real_distribution<float> dist(min, max);
+    return dist(rng_);
+}
+
+int TextRender::threadSafeRandInt(int min, int max) const {
+    std::lock_guard<std::mutex> lock(rng_mutex_);
+    std::uniform_int_distribution<int> dist(min, max);
+    return dist(rng_);
+}
+
 TextRender::TextRender(int N,
                        const sf::Font& font,
                        unsigned int charSize,
@@ -23,9 +35,10 @@ TextRender::TextRender(int N,
       mode_(mode),
       speed_(speed),
       charSize_(charSize),
-      palette_(palette)
+      palette_(palette),
+      rng_(std::random_device{}())
 {
-    std::srand(unsigned(std::time(nullptr)));
+    // No usamos más std::srand, usamos el generador thread-safe
     if (mode_ == MotionMode::Rain) {
         // Lluvia Matrix clásica (verde, infinita)
         initRain(std::max(1, N), font);
@@ -75,11 +88,9 @@ void TextRender::resize(sf::Vector2u newSize) {
         if (!drops.empty() && !drops[0].glyphs.empty()) f = drops[0].glyphs[0].getFont();
         if (!f && !dashes.empty() && !dashes[0].dots.empty()) f = dashes[0].dots[0].getFont();
         if (f) {
-            int totalGlyphs = 0;
-            #pragma omp parallel for reduction(+:totalGlyphs) schedule(static)
-            for (int k = 0; k < (int)drops.size(); ++k) {
-                totalGlyphs += (int)drops[k].glyphs.size();
-            }
+            // Usar std::accumulate en lugar de bucle paralelo para evitar condiciones de carrera
+            int totalGlyphs = std::accumulate(drops.begin(), drops.end(), 0,
+                               [](int acc, const Drop& d){ return acc + (int)d.glyphs.size(); });
 
             initRain(totalGlyphs, *f);
             initDashes(*f, std::max(4, (int)dashes.size()));
@@ -97,23 +108,23 @@ void TextRender::initParticles(int N, const sf::Font& font) {
     for (int i = 0; i < N; ++i) {
         Particle p{};
         p.text.setFont(font);
-        p.text.setString((std::rand() % 2) ? "1" : "0");
+        p.text.setString((threadSafeRandInt(0, 1)) ? "1" : "0");
         p.baseSize = float(charSize_);
         p.text.setCharacterSize(unsigned(p.baseSize));
         p.text.setFillColor(generatePseudoRandomColor(i));
 
-        p.pos = { frand(0.f, float(size_.x)), frand(0.f, float(size_.y)) };
+        p.pos = { threadSafeRand(0.f, float(size_.x)), threadSafeRand(0.f, float(size_.y)) };
 
-        const float ang = frand(0.f, 2.f * 3.14159265f);
+        const float ang = threadSafeRand(0.f, 2.f * 3.14159265f);
         p.vel = { speed_ * std::cos(ang), speed_ * std::sin(ang) };
 
-        p.angle     = frand(0.f, 2.f * 3.14159265f);
-        p.angVel    = frand(0.6f, 1.6f) * ((std::rand() % 2) ? 1.f : -1.f);
-        p.baseRadius= frand(minR, maxR);
-        p.radiusAmp = frand(10.f, 60.f);
-        p.z         = frand(-300.f, 300.f);
-        p.zVel      = frand(-30.f, 30.f);
-        p.phase     = frand(0.f, 2.f * 3.14159265f);
+        p.angle     = threadSafeRand(0.f, 2.f * 3.14159265f);
+        p.angVel    = threadSafeRand(0.6f, 1.6f) * ((threadSafeRandInt(0, 1)) ? 1.f : -1.f);
+        p.baseRadius= threadSafeRand(minR, maxR);
+        p.radiusAmp = threadSafeRand(10.f, 60.f);
+        p.z         = threadSafeRand(-300.f, 300.f);
+        p.zVel      = threadSafeRand(-30.f, 30.f);
+        p.phase     = threadSafeRand(0.f, 2.f * 3.14159265f);
 
         p.text.setPosition(p.pos);
         ps.push_back(std::move(p));
@@ -140,7 +151,7 @@ void TextRender::initRain(int approxTotalGlyphs, const sf::Font& font) {
         d.x = (c + 0.5f) * cellW;
         d.spacing = spacing;
 
-        int len = std::max(6, int(avgLen * frand(0.7f, 1.4f)));
+        int len = std::max(6, int(avgLen * threadSafeRand(0.7f, 1.4f)));
         d.glyphs.clear();
         d.glyphs.reserve(len);
 
@@ -148,10 +159,10 @@ void TextRender::initRain(int approxTotalGlyphs, const sf::Font& font) {
         const float tail = (len - 1) * d.spacing;
 
         // cabeza en un punto del ciclo [-tail, H]
-        d.headY = frand(-tail, H);
+        d.headY = threadSafeRand(-tail, H);
 
         for (int i = 0; i < len; ++i) {
-            char ch = alphabet_[std::rand() % alphabet_.size()];
+            char ch = alphabet_[threadSafeRandInt(0, alphabet_.size() - 1)];
             sf::Text g(std::string(1, ch), font, charSize_);
             if (i == 0) {
                 g.setFillColor(headColor()); // cabeza
@@ -261,20 +272,20 @@ void TextRender::initDashes(const sf::Font& font, int count) {
         L.spacing  = std::max(8.f, dotW * 1.8f);
 
         // Largo objetivo del segmento: 12%–28% del ancho (¡no toda la pantalla!)
-        float frac     = frand(0.12f, 0.28f);
+        float frac     = threadSafeRand(0.12f, 0.28f);
         float targetW  = std::max(120.f, float(size_.x) * frac);
         int   nDots    = std::max(5, int(std::round(targetW / L.spacing)));
         float totalW   = (nDots - 1) * L.spacing + L.dotWidth;
 
         // Altura y tiempo objetivo para cruzar de lado a lado
-        L.y = frand(dotCharSize * 1.2f, float(size_.y) - dotCharSize * 1.8f);
+        L.y = threadSafeRand(dotCharSize * 1.2f, float(size_.y) - dotCharSize * 1.8f);
         float travel = std::max(50.f, float(size_.x) - totalW); // recorrido real
-        float T      = frand(2.5f, 5.0f);                       // segundos por cruce
+        float T      = threadSafeRand(2.5f, 5.0f);                       // segundos por cruce
         float vxMag  = travel / T;                              // px/s
-        L.vx         = ((std::rand() % 2) ? vxMag : -vxMag);    // dirección aleatoria
+        L.vx         = ((threadSafeRandInt(0, 1)) ? vxMag : -vxMag);    // dirección aleatoria
 
         // Posición inicial dentro del rango útil
-        L.xLeft = frand(0.f, float(size_.x) - totalW);
+        L.xLeft = threadSafeRand(0.f, float(size_.x) - totalW);
 
         // Construye los puntos
         L.dots.reserve(nDots);
@@ -333,10 +344,8 @@ void TextRender::updateDashes(float dt) {
 
 // -------------------- Update: Bounce (otros modos) --------------------
 void TextRender::updateBounce(Particle& p, float dt) {
-    #pragma omp critical
-    {
-        p.pos += p.vel * dt;
-    }
+    // No necesitamos critical section aquí ya que cada hilo trabaja con una partícula diferente
+    p.pos += p.vel * dt;
 
     const sf::FloatRect bounds = p.text.getLocalBounds();
     const float w = bounds.width, h = bounds.height;
