@@ -7,36 +7,34 @@
 #include <fstream>
 #include <chrono>
 #include <iomanip>
-#include "TextRender.h"   // define MotionMode y Palette
+#include "TextRender.h"
 
 #ifdef _OPENMP
   #include <omp.h>
 #endif
 
-// Helper para imprimir el modo en el CSV
 static const char* mode_to_cstr(MotionMode m) {
     switch (m) {
         case MotionMode::Rain:   return "rain";
         case MotionMode::Bounce: return "bounce";
         case MotionMode::Spiral: return "spiral";
+        case MotionMode::Nebula: return "nebula";
     }
     return "unknown";
 }
 
-// -------------------- CLI --------------------
 struct CliOptions {
     int nChars = 200;
     int width  = 800;
     int height = 600;
     bool forceSequential = false;
     int threads = 0;
-    MotionMode mode = MotionMode::Rain;     // por defecto lluvia
-    float speed = 160.f;                    // px/s base (rain/bounce)
-    Palette palette = Palette::Mono;        // por defecto verde clásico
+    MotionMode mode = MotionMode::Rain;
+    float speed = 160.f;
+    Palette palette = Palette::Mono;
 
-    // Benchmark
-    std::string benchPath;  // ruta CSV; vacío = deshabilitado
-    int benchFrames = 0;    // 0 = no limitar; >0 = detener tras K frames
+    std::string benchPath;
+    int benchFrames = 0;
 };
 
 static void print_usage(const char* prog) {
@@ -47,27 +45,20 @@ static void print_usage(const char* prog) {
         << "  ANCHOxALTO            Resolucion, p.ej. 1024x768 (defecto: 800x600)\n\n"
         << "Opciones:\n"
         << "  --seq                 Fuerza modo secuencial\n"
-        << "  --threads K           Sugerir K hilos (para paralelo futuro)\n"
-        << "  --mode rain|bounce|spiral    Modo de movimiento (defecto: rain)\n"
-        << "  --palette mono|neon|rainbow  Paleta de color para rain (defecto: mono)\n"
-        << "  --speed V             Velocidad base en px/s (defecto: 160)\n"
-        << "  --bench FILE          Registrar tiempos por frame en CSV\n"
-        << "  --bench-frames K      Detener tras K frames (para mediciones)\n"
-        << "  -h, --help            Ayuda\n\n"
-        << "Ejemplos:\n"
-        << "  " << prog << "\n"
-        << "  " << prog << " 300 1280x720 --mode rain --speed 220 --palette neon\n"
-        << "  " << prog << " --mode bounce\n"
-        << "  " << prog << " 200 1024x768 --mode spiral\n"
-        << "  " << prog << " --seq --bench out.csv --bench-frames 300\n";
+        << "  --threads K           Sugerir K hilos\n"
+        << "  --mode rain|bounce|spiral|nebula   (defecto: rain)\n"
+        << "  --palette mono|neon|rainbow        (defecto: mono)\n"
+        << "  --speed V             Velocidad base px/s (defecto: 160)\n"
+        << "  --bench FILE          CSV de benchmark\n"
+        << "  --bench-frames K      Detener tras K frames\n"
+        << "  -h, --help            Ayuda\n";
 }
 
 static bool parse_resolution(const std::string& s, int& w, int& h) {
     std::regex re(R"(^\s*(\d+)\s*[xX]\s*(\d+)\s*$)");
     std::smatch m;
     if (std::regex_match(s, m, re)) {
-        w = std::stoi(m[1]);
-        h = std::stoi(m[2]);
+        w = std::stoi(m[1]); h = std::stoi(m[2]);
         return (w >= 160 && h >= 120 && w <= 10000 && h <= 10000);
     }
     return false;
@@ -80,12 +71,10 @@ static bool file_exists(const std::string& path) {
 }
 
 static bool parse_cli(int argc, char** argv, CliOptions& opts) {
-    // ayuda
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "-h" || a == "--help") { print_usage(argv[0]); std::exit(0); }
     }
-    // opciones
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--seq") { opts.forceSequential = true; continue; }
@@ -101,7 +90,8 @@ static bool parse_cli(int argc, char** argv, CliOptions& opts) {
             if      (m == "rain")   opts.mode = MotionMode::Rain;
             else if (m == "bounce") opts.mode = MotionMode::Bounce;
             else if (m == "spiral") opts.mode = MotionMode::Spiral;
-            else { std::cerr << "Error: --mode {rain|bounce|spiral}\n"; return false; }
+            else if (m == "nebula") opts.mode = MotionMode::Nebula;
+            else { std::cerr << "Error: --mode {rain|bounce|spiral|nebula}\n"; return false; }
             continue;
         }
         if (a == "--palette") {
@@ -121,25 +111,22 @@ static bool parse_cli(int argc, char** argv, CliOptions& opts) {
         }
         if (a == "--bench") {
             if (i + 1 >= argc) { std::cerr << "Error: --bench FILE\n"; return false; }
-            opts.benchPath = argv[++i];
-            continue;
+            opts.benchPath = argv[++i]; continue;
         }
         if (a == "--bench-frames") {
             if (i + 1 >= argc) { std::cerr << "Error: --bench-frames K\n"; return false; }
             int k = std::atoi(argv[++i]);
-            if (k <= 0) { std::cerr << "Error: --bench-frames debe ser > 0\n"; return false; }
-            opts.benchFrames = k;
-            continue;
+            if (k <= 0) { std::cerr << "Error: --bench-frames > 0\n"; return false; }
+            opts.benchFrames = k; continue;
         }
     }
-    // posicionales: N y ANCHOxALTO (en cualquier orden, máx 2)
     int pos = 0;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--seq" || a == "--threads" || a == "--mode" || a == "--palette" || a == "--speed"
             || a == "--bench" || a == "--bench-frames" || a == "-h" || a == "--help") {
             if (a == "--threads" || a == "--mode" || a == "--palette" || a == "--speed"
-                || a == "--bench" || a == "--bench-frames") ++i; // salta valor
+                || a == "--bench" || a == "--bench-frames") ++i;
             continue;
         }
         if (pos < 2) {
@@ -151,12 +138,8 @@ static bool parse_cli(int argc, char** argv, CliOptions& opts) {
                 opts.nChars = n;
             }
             ++pos;
-        } else {
-            std::cerr << "Demasiados argumentos posicionales.\n";
-            return false;
-        }
+        } else { std::cerr << "Demasiados posicionales.\n"; return false; }
     }
-    // defensivo
     if (1LL * opts.width * opts.height > 10000LL * 10000LL) { std::cerr << "Resolucion gigante.\n"; return false; }
     if (opts.nChars > opts.width * opts.height) {
         std::cerr << "Advertencia: N > pixeles; ajustando N.\n";
@@ -168,8 +151,9 @@ static bool parse_cli(int argc, char** argv, CliOptions& opts) {
     }
     return true;
 }
-// -------------------- FIN CLI --------------------
 
+// (resto del main igual que lo tenias)
+#include <chrono>
 static int run_loop(const CliOptions& opts, bool vsync = true) {
     namespace fs = std::filesystem;
     using clock_t = std::chrono::steady_clock;
@@ -194,19 +178,13 @@ static int run_loop(const CliOptions& opts, bool vsync = true) {
     #endif
         const char* exec = opts.forceSequential ? "seq" : "omp";
 
-    // Benchmark: abrir CSV si se pidió
     std::ofstream benchOut;
     const bool benchEnabled = !opts.benchPath.empty();
     if (benchEnabled) {
         bool newFile = !fs::exists(opts.benchPath);
         benchOut.open(opts.benchPath, std::ios::app);
-        if (!benchOut) {
-            std::cerr << "No pude abrir " << opts.benchPath << " para escribir.\n";
-            return EXIT_FAILURE;
-        }
-        if (newFile) {
-            benchOut << "exec,mode,threads_req,threads_eff,width,height,N,speed,frame,dt_s,update_ms,render_ms,total_ms,fps\n";
-        }
+        if (!benchOut) { std::cerr << "No pude abrir " << opts.benchPath << "\n"; return EXIT_FAILURE; }
+        if (newFile) benchOut << "exec,mode,threads_req,threads_eff,width,height,N,speed,frame,dt_s,update_ms,render_ms,total_ms,fps\n";
     }
 
     sf::Clock dtClock;
@@ -236,7 +214,6 @@ static int run_loop(const CliOptions& opts, bool vsync = true) {
 
         auto t2 = clock_t::now();
 
-        // Métricas
         double update_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         double render_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
         double total_ms  = std::chrono::duration<double, std::milli>(t2 - t0).count();
@@ -245,7 +222,7 @@ static int run_loop(const CliOptions& opts, bool vsync = true) {
         if (benchEnabled) {
             benchOut    << exec << ','
                         << mode_to_cstr(opts.mode) << ','
-                        << opts.threads << ','
+                        << 0 << ','
                         << threads_eff << ','
                         << opts.width << ','
                         << opts.height << ','
@@ -258,13 +235,10 @@ static int run_loop(const CliOptions& opts, bool vsync = true) {
                         << total_ms << ','
                         << std::setprecision(2) << fps
                         << '\n';
-
         }
 
         ++frame;
-        if (opts.benchFrames > 0 && frame >= opts.benchFrames) {
-            window.close(); // salida automática para benchmarks
-        }
+        if (opts.benchFrames > 0 && frame >= opts.benchFrames) window.close();
     }
 
     if (benchEnabled) benchOut.close();
@@ -274,31 +248,36 @@ static int run_loop(const CliOptions& opts, bool vsync = true) {
 static int run_sequential(const CliOptions& opts) { return run_loop(opts); }
 
 static int run_parallel(const CliOptions& opts) {
-    #ifdef _OPENMP
-        if (opts.threads > 0) omp_set_num_threads(opts.threads);
+#ifdef _OPENMP
+    if (opts.threads > 0) omp_set_num_threads(opts.threads);
 
-        // Sincronización inicial
-        #pragma omp parallel
+    // Mensaje de arranque en una región paralela
+    #pragma omp parallel
+    {
+        #pragma omp single
         {
-            #pragma omp single
-            {
-                std::cout << "Iniciando ejecución paralela con " << omp_get_num_threads() << " hilos.\n";
-            }
+            std::cout << "Iniciando ejecucion paralela con "
+                      << omp_get_num_threads() << " hilos.\n";
         }
-    #endif
+    }
+#endif
 
-    // Ejecutar el bucle principal con sincronización
-    int result;
+    int result = 0;
+
+#ifdef _OPENMP
+    // Ejecuta el bucle principal dentro de una región paralela,
+    // pero una sola hebra llama a run_loop
     #pragma omp parallel
     {
         #pragma omp single
         {
             result = run_loop(opts);
         }
-
-        // Barrera para sincronizar hilos antes de finalizar
         #pragma omp barrier
     }
+#else
+    result = run_loop(opts);
+#endif
 
     return result;
 }

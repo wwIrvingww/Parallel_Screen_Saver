@@ -3,26 +3,13 @@
 #include <ctime>
 #include <cmath>
 #include <algorithm>
-#include <numeric> // std::accumulate
+#include <numeric>
 
 #ifdef _OPENMP
   #include <omp.h>
 #endif
 
-// Aleatorio float
 static float frand(float a, float b) { return a + (b - a) * (float(std::rand()) / float(RAND_MAX)); }
-
-float TextRender::threadSafeRand(float min, float max) const {
-    std::lock_guard<std::mutex> lock(rng_mutex_);
-    std::uniform_real_distribution<float> dist(min, max);
-    return dist(rng_);
-}
-
-int TextRender::threadSafeRandInt(int min, int max) const {
-    std::lock_guard<std::mutex> lock(rng_mutex_);
-    std::uniform_int_distribution<int> dist(min, max);
-    return dist(rng_);
-}
 
 TextRender::TextRender(int N,
                        const sf::Font& font,
@@ -35,16 +22,15 @@ TextRender::TextRender(int N,
       mode_(mode),
       speed_(speed),
       charSize_(charSize),
-      palette_(palette),
-      rng_(std::random_device{}())
+      palette_(palette)
 {
-    // No usamos más std::srand, usamos el generador thread-safe
+    std::srand(unsigned(std::time(nullptr)));
     if (mode_ == MotionMode::Rain) {
-        // Lluvia Matrix clásica (verde, infinita)
         initRain(std::max(1, N), font);
-        // Líneas punteadas que rebotan — 4..7 líneas, velocidades aleatorias
         int dashCount = std::clamp(int(std::round(std::sqrt(float(std::max(1, N))) / 3.f)), 4, 7);
         initDashes(font, dashCount);
+    } else if (mode_ == MotionMode::Nebula) {
+        initNebula(std::max(1, N), font);
     } else {
         initParticles(std::max(1, N), font);
     }
@@ -64,9 +50,12 @@ void TextRender::update(float dt) {
     } else if (mode_ == MotionMode::Bounce) {
         #pragma omp parallel for schedule(static)
         for (auto& p : ps) updateBounce(p, dt);
-    } else { // Spiral
+    } else if (mode_ == MotionMode::Spiral) {
         #pragma omp parallel for schedule(static)
         for (auto& p : ps) updateSpiral(p, dt);
+    } else { // Nebula
+        #pragma omp parallel for schedule(static)
+        for (auto& p : ps) updateNebula(p, dt);
     }
 }
 
@@ -88,18 +77,16 @@ void TextRender::resize(sf::Vector2u newSize) {
         if (!drops.empty() && !drops[0].glyphs.empty()) f = drops[0].glyphs[0].getFont();
         if (!f && !dashes.empty() && !dashes[0].dots.empty()) f = dashes[0].dots[0].getFont();
         if (f) {
-            // Usar std::accumulate en lugar de bucle paralelo para evitar condiciones de carrera
-            int totalGlyphs = std::accumulate(drops.begin(), drops.end(), 0,
-                               [](int acc, const Drop& d){ return acc + (int)d.glyphs.size(); });
-
+            int totalGlyphs = 0;
+            #pragma omp parallel for reduction(+:totalGlyphs) schedule(static)
+            for (int k = 0; k < (int)drops.size(); ++k) totalGlyphs += (int)drops[k].glyphs.size();
             initRain(totalGlyphs, *f);
             initDashes(*f, std::max(4, (int)dashes.size()));
         }
     }
 }
 
-
-// -------------------- Init: bounce/spiral (sin cambios “Matrix”) --------------------
+// -------------------- Init: Bounce/Spiral base --------------------
 void TextRender::initParticles(int N, const sf::Font& font) {
     ps.clear(); ps.reserve(N);
     const float minR = 20.f;
@@ -108,30 +95,191 @@ void TextRender::initParticles(int N, const sf::Font& font) {
     for (int i = 0; i < N; ++i) {
         Particle p{};
         p.text.setFont(font);
-        p.text.setString((threadSafeRandInt(0, 1)) ? "1" : "0");
+        p.text.setString((std::rand() % 2) ? "1" : "0");
         p.baseSize = float(charSize_);
         p.text.setCharacterSize(unsigned(p.baseSize));
         p.text.setFillColor(generatePseudoRandomColor(i));
 
-        p.pos = { threadSafeRand(0.f, float(size_.x)), threadSafeRand(0.f, float(size_.y)) };
+        p.pos = { frand(0.f, float(size_.x)), frand(0.f, float(size_.y)) };
 
-        const float ang = threadSafeRand(0.f, 2.f * 3.14159265f);
+        const float ang = frand(0.f, 2.f * 3.14159265f);
         p.vel = { speed_ * std::cos(ang), speed_ * std::sin(ang) };
 
-        p.angle     = threadSafeRand(0.f, 2.f * 3.14159265f);
-        p.angVel    = threadSafeRand(0.6f, 1.6f) * ((threadSafeRandInt(0, 1)) ? 1.f : -1.f);
-        p.baseRadius= threadSafeRand(minR, maxR);
-        p.radiusAmp = threadSafeRand(10.f, 60.f);
-        p.z         = threadSafeRand(-300.f, 300.f);
-        p.zVel      = threadSafeRand(-30.f, 30.f);
-        p.phase     = threadSafeRand(0.f, 2.f * 3.14159265f);
+        // Spiral
+        p.angle     = frand(0.f, 2.f * 3.14159265f);
+        p.angVel    = frand(0.6f, 1.6f) * ((std::rand() % 2) ? 1.f : -1.f);
+        p.baseRadius= frand(minR, maxR);
+        p.radiusAmp = frand(10.f, 60.f);
+        p.z         = frand(-300.f, 300.f);
+        p.zVel      = frand(-30.f, 30.f);
+        p.phase     = frand(0.f, 2.f * 3.14159265f);
+
+        // Nebula
+        p.spinDeg   = frand(0.f, 360.f);
+        p.spinVelDeg= frand(60.f, 220.f) * ((std::rand() % 2) ? 1.f : -1.f);
+        p.scale     = frand(0.8f, 1.2f);
+        p.scaleVel  = frand(-0.35f, 0.35f);
+        p.alpha     = frand(140.f, 230.f);
+        p.alphaVel  = frand(-25.f, 25.f);
+        p.noiseSeed = frand(0.f, 1000.f);
 
         p.text.setPosition(p.pos);
         ps.push_back(std::move(p));
     }
 }
 
-// -------------------- Init: lluvia Matrix (clásica, verde, infinita) --------------------
+// -------------------- Init: Nebula --------------------
+void TextRender::initNebula(int N, const sf::Font& font) {
+    ps.clear(); ps.reserve(N);
+
+    // escalar tamaño si N es muy grande para no saturar
+    const float densityScale = std::clamp(300.f / float(std::max(200, N)), 0.35f, 1.0f);
+
+    for (int i = 0; i < N; ++i) {
+        Particle p{};
+        p.text.setFont(font);
+        char ch = alphabet_[std::rand() % alphabet_.size()];
+        p.text.setString(std::string(1, ch));
+
+        p.baseSize = float(charSize_) * densityScale;
+        p.text.setCharacterSize(unsigned(p.baseSize));
+
+        // color inicial
+        float t01 = frand(0.f, 1.f);
+        p.text.setFillColor(nebulaColor(t01, 200.f));
+
+        // POSICIÓN EN TODA LA PANTALLA (uniforme)
+        p.pos = { frand(0.f, float(size_.x)), frand(0.f, float(size_.y)) };
+
+        // velocidad inicial en dirección aleatoria, magnitud ~ speed_
+        const float ang = frand(0.f, 6.2831853f);
+        const float vmag = std::max(30.f, speed_) * frand(0.5f, 1.0f) * 0.5f;
+        p.vel = { vmag * std::cos(ang), vmag * std::sin(ang) };
+
+        // Spiral (no usado aquí)
+        p.angle = 0.f; p.angVel = 0.0f; p.baseRadius = 0.f; p.radiusAmp = 0.f;
+        p.z = 0.f; p.zVel = 0.f; p.phase = 0.f;
+
+        // Nebula
+        p.spinDeg    = frand(0.f, 360.f);
+        p.spinVelDeg = frand(80.f, 260.f) * ((std::rand() % 2) ? 1.f : -1.f);
+        p.scale      = frand(0.75f, 1.25f);
+        p.scaleVel   = frand(-0.25f, 0.25f);
+        p.alpha      = frand(120.f, 240.f);
+        p.alphaVel   = frand(-35.f, 35.f);
+        p.noiseSeed  = frand(0.f, 1000.f);
+
+        p.text.setPosition(p.pos);
+        ps.push_back(std::move(p));
+    }
+}
+
+// -------------------- Campo de flujo Nebula --------------------
+sf::Vector2f TextRender::nebulaFlowField(const sf::Vector2f& p, float seed, float t) const {
+    (void)p; // no usamos centro
+    float nx = std::sin(0.08f * t + seed * 0.71f);
+    float ny = std::cos(0.11f * t + seed * 1.31f);
+    // Aceleración suave y variable para que no sea movimiento lineal perfecto
+    return { 12.f * nx, 12.f * ny };
+}
+
+
+// Gradiente “nebular”: azul -> purpura -> rosa -> dorado tenue
+sf::Color TextRender::nebulaColor(float t01, float alpha) const {
+    t01 = std::clamp(t01, 0.f, 1.f);
+
+    sf::Color a(80,   0,   0);   // rojo muy oscuro
+    sf::Color b(180,  30,  30);  // rojo medio
+    sf::Color c(255,  60,  60);  // rojo vivo
+    sf::Color d(255, 160,  60);  // naranja-amarillo
+
+    auto lerp = [](const sf::Color& u, const sf::Color& v, float t){
+        return sf::Color(
+            (sf::Uint8)std::round(u.r + (v.r - u.r) * t),
+            (sf::Uint8)std::round(u.g + (v.g - u.g) * t),
+            (sf::Uint8)std::round(u.b + (v.b - u.b) * t),
+            255
+        );
+    };
+
+    sf::Color m;
+    if (t01 < 0.33f)      m = lerp(a, b, t01 / 0.33f);
+    else if (t01 < 0.66f) m = lerp(b, c, (t01 - 0.33f) / 0.33f);
+    else                  m = lerp(c, d, (t01 - 0.66f) / 0.34f);
+
+    m.a = (sf::Uint8)std::clamp((int)std::round(alpha), 0, 255);
+    return m;
+}
+
+// -------------------- Update: Nebula --------------------
+void TextRender::updateNebula(Particle& p, float dt) {
+    // Aceleración “ruido” muy suave (opcional)
+    sf::Vector2f flow = nebulaFlowField(p.pos, p.noiseSeed, time_);
+    p.vel.x += flow.x * dt;
+    p.vel.y += flow.y * dt;
+
+    // Limita velocidad
+    float vmax = std::max(40.f, speed_) * 0.5f;
+    float vlen = std::sqrt(p.vel.x*p.vel.x + p.vel.y*p.vel.y);
+    if (vlen > vmax) { p.vel.x *= vmax/vlen; p.vel.y *= vmax/vlen; }
+
+    // Integración
+    p.pos += p.vel * dt;
+
+    // giro propio + respiración
+    p.spinDeg += p.spinVelDeg * dt;
+    p.scale += p.scaleVel * dt;
+    if (p.scale < 0.7f) { p.scale = 0.7f; p.scaleVel = std::abs(p.scaleVel); }
+    if (p.scale > 1.4f) { p.scale = 1.4f; p.scaleVel = -std::abs(p.scaleVel); }
+
+    p.alpha += p.alphaVel * dt;
+    if (p.alpha < 90.f)  { p.alpha = 90.f;  p.alphaVel = std::abs(p.alphaVel); }
+    if (p.alpha > 255.f) { p.alpha = 255.f; p.alphaVel = -std::abs(p.alphaVel); }
+
+    float t01 = 0.5f + 0.5f * std::sin(0.7f * time_ + p.noiseSeed * 0.9f);
+    sf::Color col = nebulaColor(t01, p.alpha);
+    p.text.setFillColor(col);
+
+    // Centro de rotación al medio del glifo
+    sf::FloatRect lb = p.text.getLocalBounds();
+    p.text.setOrigin(lb.left + lb.width * 0.5f, lb.top + lb.height * 0.5f);
+
+    // --- REBOTE EN BORDES (con tamaño real del glifo) ---
+    // Semitamaño del glifo con la escala actual en píxeles
+    const float halfW = 0.5f * lb.width  * p.scale;
+    const float halfH = 0.5f * lb.height * p.scale;
+
+    const float restitution = 0.9f; // 1.0 = rebote perfecto; <1 = pierde un poco
+    const float wallFriction = 0.98f;
+
+    if (p.pos.x < halfW) {
+        p.pos.x = halfW;
+        p.vel.x = -p.vel.x * restitution;
+        p.vel.y *= wallFriction;
+    } else if (p.pos.x > float(size_.x) - halfW) {
+        p.pos.x = float(size_.x) - halfW;
+        p.vel.x = -p.vel.x * restitution;
+        p.vel.y *= wallFriction;
+    }
+
+    if (p.pos.y < halfH) {
+        p.pos.y = halfH;
+        p.vel.y = -p.vel.y * restitution;
+        p.vel.x *= wallFriction;
+    } else if (p.pos.y > float(size_.y) - halfH) {
+        p.pos.y = float(size_.y) - halfH;
+        p.vel.y = -p.vel.y * restitution;
+        p.vel.x *= wallFriction;
+    }
+    // --- fin rebote ---
+
+    // Aplicar transformaciones finales
+    p.text.setPosition(p.pos);
+    p.text.setRotation(p.spinDeg);
+    p.text.setScale(p.scale, p.scale);
+}
+
+// -------------------- Init/Update: Rain y Dashes (igual que tenias) --------------------
 void TextRender::initRain(int approxTotalGlyphs, const sf::Font& font) {
     drops.clear();
 
@@ -151,25 +299,23 @@ void TextRender::initRain(int approxTotalGlyphs, const sf::Font& font) {
         d.x = (c + 0.5f) * cellW;
         d.spacing = spacing;
 
-        int len = std::max(6, int(avgLen * threadSafeRand(0.7f, 1.4f)));
+        int len = std::max(6, int(avgLen * frand(0.7f, 1.4f)));
         d.glyphs.clear();
         d.glyphs.reserve(len);
 
         const float H = float(size_.y);
         const float tail = (len - 1) * d.spacing;
 
-        // cabeza en un punto del ciclo [-tail, H]
-        d.headY = threadSafeRand(-tail, H);
+        d.headY = frand(-tail, H);
 
         for (int i = 0; i < len; ++i) {
-            char ch = alphabet_[threadSafeRandInt(0, alphabet_.size() - 1)];
+            char ch = alphabet_[std::rand() % alphabet_.size()];
             sf::Text g(std::string(1, ch), font, charSize_);
-            if (i == 0) {
-                g.setFillColor(headColor()); // cabeza
-            } else {
+            if (i == 0) g.setFillColor(headColor());
+            else {
                 float t = float(i) / float(len);
                 unsigned char a = (unsigned char)std::clamp(255 - int(255 * t * 1.2f), 40, 255);
-                g.setFillColor(neonGreen(a)); // cola verde
+                g.setFillColor(neonGreen(a));
             }
             float y = d.headY - i * d.spacing;
             g.setPosition(d.x, y);
@@ -184,13 +330,11 @@ void TextRender::updateRain(float dt) {
     const float H = float(size_.y);
     const int frame = int(time_ * 60.0f);
 
-    // 1) Avanza la cabeza de cada columna (independiente por drop)
     #pragma omp parallel for schedule(static)
     for (int k = 0; k < (int)drops.size(); ++k) {
         drops[k].headY += std::max(80.f, speed_) * dt;
     }
 
-    // 2) Tamaño rectangular para collapse(2): max longitud de cola
     int maxLen = 0;
     #pragma omp parallel for reduction(max:maxLen) schedule(static)
     for (int k = 0; k < (int)drops.size(); ++k) {
@@ -198,32 +342,28 @@ void TextRender::updateRain(float dt) {
         if (len > maxLen) maxLen = len;
     }
 
-    // 3) Posicionar TODOS los glifos con collapse(2); guardamos los "huecos"
     #pragma omp parallel for collapse(2) schedule(static)
     for (int k = 0; k < (int)drops.size(); ++k) {
         for (int i = 0; i < maxLen; ++i) {
-            if (i >= (int)drops[k].glyphs.size()) continue; // fuera del tamaño real
+            if (i >= (int)drops[k].glyphs.size()) continue;
             Drop& d = drops[k];
 
             const int len = (int)d.glyphs.size();
             const float tail   = (len - 1) * d.spacing;
             const float period = H + tail + d.spacing;
 
-            // y conceptual + wrap continuo
             float y = d.headY - i * d.spacing;
             float yWrapped = std::fmod(y + period, period);
             if (yWrapped < 0.f) yWrapped += period;
             y = yWrapped - tail;
 
-            // "flicker" determinista (evita RNG compartido en paralelo)
-            bool flickCol = (((unsigned)k*73856093u ^ (unsigned)frame*19349663u) & 7u) == 0u;   // ~1/8
-            bool flickGly = (((unsigned)i*83492791u ^ (unsigned)frame*2971215073u) % 10) == 0u; // ~1/10
+            bool flickCol = (((unsigned)k*73856093u ^ (unsigned)frame*19349663u) & 7u) == 0u;
+            bool flickGly = (((unsigned)i*83492791u ^ (unsigned)frame*2971215073u) % 10) == 0u;
             if (flickCol && flickGly) {
                 char ch = alphabet_[(k + i + frame) % (int)alphabet_.size()];
                 d.glyphs[i].setString(std::string(1, ch));
             }
 
-            // pulso leve en cabeza
             if (i == 0) {
                 sf::Color c = headColor();
                 c.a = (unsigned char)std::clamp(200 + int(55 * std::sin(time_ * 6.f + k)), 160, 255);
@@ -234,7 +374,6 @@ void TextRender::updateRain(float dt) {
         }
     }
 
-    // 4) Ajuste de headY si se pasó varios periodos (por drop)
     #pragma omp parallel for schedule(static)
     for (int k = 0; k < (int)drops.size(); ++k) {
         Drop& d = drops[k];
@@ -253,13 +392,11 @@ void TextRender::updateRain(float dt) {
     }
 }
 
-
-// -------------------- Init: líneas punteadas --------------------
+// -------------------- Dashes --------------------
 void TextRender::initDashes(const sf::Font& font, int count) {
     dashes.clear();
     dashes.reserve(count);
 
-    // Puntos más pequeños que los dígitos para que se sientan "líneas"
     unsigned int dotCharSize = std::max(10u, charSize_ / 2);
 
     sf::Text probe(".", font, dotCharSize);
@@ -271,28 +408,24 @@ void TextRender::initDashes(const sf::Font& font, int count) {
         L.dotWidth = dotW;
         L.spacing  = std::max(8.f, dotW * 1.8f);
 
-        // Largo objetivo del segmento: 12%–28% del ancho (¡no toda la pantalla!)
-        float frac     = threadSafeRand(0.12f, 0.28f);
+        float frac     = frand(0.12f, 0.28f);
         float targetW  = std::max(120.f, float(size_.x) * frac);
         int   nDots    = std::max(5, int(std::round(targetW / L.spacing)));
         float totalW   = (nDots - 1) * L.spacing + L.dotWidth;
 
-        // Altura y tiempo objetivo para cruzar de lado a lado
-        L.y = threadSafeRand(dotCharSize * 1.2f, float(size_.y) - dotCharSize * 1.8f);
-        float travel = std::max(50.f, float(size_.x) - totalW); // recorrido real
-        float T      = threadSafeRand(2.5f, 5.0f);                       // segundos por cruce
-        float vxMag  = travel / T;                              // px/s
-        L.vx         = ((threadSafeRandInt(0, 1)) ? vxMag : -vxMag);    // dirección aleatoria
+        L.y = frand(dotCharSize * 1.2f, float(size_.y) - dotCharSize * 1.8f);
+        float travel = std::max(50.f, float(size_.x) - totalW);
+        float T      = frand(2.5f, 5.0f);
+        float vxMag  = travel / T;
+        L.vx         = ((std::rand() % 2) ? vxMag : -vxMag);
 
-        // Posición inicial dentro del rango útil
-        L.xLeft = threadSafeRand(0.f, float(size_.x) - totalW);
+        L.xLeft = frand(0.f, float(size_.x) - totalW);
 
-        // Construye los puntos
         L.dots.reserve(nDots);
         for (int i = 0; i < nDots; ++i) {
             sf::Text dot(".", font, dotCharSize);
             sf::Color c = neonGreen(220);
-            if (i % 2 == 1) c.a = 180; // alterna un poco el alpha para más "dashy"
+            if (i % 2 == 1) c.a = 180;
             dot.setFillColor(c);
             dot.setPosition(L.xLeft + i * L.spacing, L.y);
             L.dots.push_back(std::move(dot));
@@ -303,7 +436,6 @@ void TextRender::initDashes(const sf::Font& font, int count) {
 }
 
 void TextRender::updateDashes(float dt) {
-    // 1) Avanza cada línea y rebota (independiente)
     #pragma omp parallel for schedule(static)
     for (int li = 0; li < (int)dashes.size(); ++li) {
         DashLine& L = dashes[li];
@@ -321,7 +453,6 @@ void TextRender::updateDashes(float dt) {
         if (L.xLeft > rightBound) { L.xLeft = rightBound; L.vx = -std::fabs(L.vx); }
     }
 
-    // 2) Rectángulo para collapse: máximo número de puntos en una línea
     int maxDots = 0;
     #pragma omp parallel for reduction(max:maxDots) schedule(static)
     for (int li = 0; li < (int)dashes.size(); ++li) {
@@ -329,7 +460,6 @@ void TextRender::updateDashes(float dt) {
         if (n > maxDots) maxDots = n;
     }
 
-    // 3) Posiciona todos los puntos con collapse(2)
     #pragma omp parallel for collapse(2) schedule(static)
     for (int li = 0; li < (int)dashes.size(); ++li) {
         for (int i = 0; i < maxDots; ++i) {
@@ -340,12 +470,12 @@ void TextRender::updateDashes(float dt) {
     }
 }
 
-
-
-// -------------------- Update: Bounce (otros modos) --------------------
+// -------------------- Update: Bounce/Spiral (como tenias) --------------------
 void TextRender::updateBounce(Particle& p, float dt) {
-    // No necesitamos critical section aquí ya que cada hilo trabaja con una partícula diferente
-    p.pos += p.vel * dt;
+    #pragma omp critical
+    {
+        p.pos += p.vel * dt;
+    }
 
     const sf::FloatRect bounds = p.text.getLocalBounds();
     const float w = bounds.width, h = bounds.height;
@@ -362,7 +492,6 @@ void TextRender::updateBounce(Particle& p, float dt) {
     p.text.setPosition(p.pos);
 }
 
-// -------------------- Update: Spiral (otros modos) --------------------
 void TextRender::updateSpiral(Particle& p, float dt) {
     p.angle += p.angVel * dt;
     const float r = p.baseRadius + p.radiusAmp * std::sin(p.phase + p.angle * 0.9f);

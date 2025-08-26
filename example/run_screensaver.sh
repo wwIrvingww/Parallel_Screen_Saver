@@ -1,22 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Uso: ./examples/run_screensaver.sh [N] [ANCHOxALTO] [FRAMES] [BENCH_CSV]
-# - N: número de caracteres (def: 200)
-# - ANCHOxALTO: resolución, ej. 1024x768 (def: 800x600)
-# - FRAMES: nº de frames a registrar si se activa benchmark (def: 0 = ilimitado)
-# - BENCH_CSV: ruta CSV para registrar métricas (def: vacío = no registrar)
-#
-# Ejemplos:
-#   ./example/run_screensaver.sh 300 1280x720 300 bench/bench_$(date +%Y%m%d_%H%M%S).csv
-#   OMP_NUM_THREADS=8 ./example/run_screensaver.sh 500 1024x768 600 bench/bench.csv
-#   ./example/run_screensaver.sh 300 1280x720
-#   ./example/run_screensaver.sh 
+# Uso: ./examples/run_screensaver.sh [N] [ANCHOxALTO] [FRAMES] [BENCH_CSV] [MODE]
+# - N: numero de caracteres (def: 200)
+# - ANCHOxALTO: resolucion, ej. 1024x768 (def: 800x600)
+# - FRAMES: frames a registrar si bench (def: 0 = ilimitado)
+# - BENCH_CSV: ruta CSV (def: vacio = no bench)
+# - MODE: rain|bounce|spiral|nebula (def: rain)
 
 N="${1:-200}"
 RES="${2:-800x600}"
 FRAMES="${3:-0}"
 BENCH="${4:-}"
+MODE="${5:-rain}"
+
 WIDTH="${RES%x*}"
 HEIGHT="${RES#*x}"
 
@@ -32,10 +29,10 @@ popd >/dev/null
 
 mkdir -p "$PROJECT_ROOT/bench"
 
-echo "Ejecutando matrix_screensaver N=$N RES=$RES FRAMES=$FRAMES BENCH='${BENCH:-<none>}'"
+echo "Ejecutando matrix_screensaver N=$N RES=$RES FRAMES=$FRAMES MODE=$MODE BENCH='${BENCH:-<none>}''"
 pushd "$PROJECT_ROOT" >/dev/null
 
-ARGS=("$N" "$RES")
+ARGS=("$N" "$RES" "--mode" "$MODE")
 if [[ -n "$BENCH" ]]; then
   ARGS+=("--bench" "$BENCH")
 fi
