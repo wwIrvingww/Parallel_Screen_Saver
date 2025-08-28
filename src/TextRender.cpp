@@ -1,16 +1,20 @@
+// src/TextRender.cpp
 #include "TextRender.h"
 #include <cstdlib>
 #include <ctime>
 #include <cmath>
 #include <algorithm>
 #include <numeric>
+#include <iostream>
 
 #ifdef _OPENMP
   #include <omp.h>
 #endif
 
+// -------------------- util --------------------
 static float frand(float a, float b) { return a + (b - a) * (float(std::rand()) / float(RAND_MAX)); }
 
+// -------------------- ctor --------------------
 TextRender::TextRender(int N,
                        const sf::Font& font,
                        unsigned int charSize,
@@ -25,23 +29,51 @@ TextRender::TextRender(int N,
       palette_(palette)
 {
     std::srand(unsigned(std::time(nullptr)));
+
     if (mode_ == MotionMode::Rain) {
         initRain(std::max(1, N), font);
         int dashCount = std::clamp(int(std::round(std::sqrt(float(std::max(1, N))) / 3.f)), 4, 7);
         initDashes(font, dashCount);
     } else if (mode_ == MotionMode::Nebula) {
         initNebula(std::max(1, N), font);
+
+        // OBJ centrado en pantalla
+        model_ = std::make_unique<ObjModel>();
+        modelEnabled_ = model_->loadFromFile("assets/models/center.obj");
+        if (!modelEnabled_) {
+            std::cerr << "[OBJ] No se pudo cargar assets/models/center.obj\n";
+        }
+
+        // Estado inicial: o rota, o deriva en diagonal
+        if (std::rand() % 2 == 0) {
+            modelCtrl_.mode = ModelCtrl::Mode::RotateY;
+            modelCtrl_.yawVelDeg = frand(40.f, 120.f) * ((std::rand()%2)? 1.f : -1.f);
+            modelCtrl_.timer = frand(2.5f, 5.0f);
+        } else {
+            modelCtrl_.mode = ModelCtrl::Mode::Drift;
+            float speedPix = frand(60.f, 160.f);
+            float sx = (std::rand()%2 ? 1.f : -1.f);
+            float sy = (std::rand()%2 ? 1.f : -1.f);
+            float inv = 1.0f / std::sqrt(2.f);
+            modelCtrl_.driftVel = { sx * speedPix * inv, sy * speedPix * inv };
+            modelCtrl_.timer = frand(2.0f, 4.0f);
+        }
+        modelCtrl_.offset = {0.f, 0.f};
+        modelCtrl_.returning = false;
+
     } else {
         initParticles(std::max(1, N), font);
     }
 }
 
+// -------------------- helpers --------------------
 sf::Color TextRender::generatePseudoRandomColor(int seed) {
     std::mt19937 rng(seed);
     std::uniform_int_distribution<int> colorChannel(50, 255);
     return sf::Color(colorChannel(rng), colorChannel(rng), colorChannel(rng));
 }
 
+// -------------------- update/render/resize --------------------
 void TextRender::update(float dt) {
     time_ += dt;
     if (mode_ == MotionMode::Rain) {
@@ -56,6 +88,7 @@ void TextRender::update(float dt) {
     } else { // Nebula
         #pragma omp parallel for schedule(static)
         for (auto& p : ps) updateNebula(p, dt);
+        updateModel(dt);
     }
 }
 
@@ -65,6 +98,15 @@ void TextRender::render(sf::RenderWindow& window) {
             for (auto& g : d.glyphs) window.draw(g);
         for (auto& L : dashes)
             for (auto& dot : L.dots) window.draw(dot);
+    } else if (mode_ == MotionMode::Nebula) {
+        for (auto& p : ps) window.draw(p.text);
+        if (modelEnabled_ && model_) {
+            sf::Vector2f center(float(size_.x) * 0.5f, float(size_.y) * 0.5f);
+            float target = 0.40f * std::min(float(size_.x), float(size_.y));
+            model_->drawProjectedYawAndOffset(window, center, target,
+                                              modelCtrl_.yawDeg, modelCtrl_.offset,
+                                              sf::Color(220,220,220,235));
+        }
     } else {
         for (auto& p : ps) window.draw(p.text);
     }
@@ -86,7 +128,57 @@ void TextRender::resize(sf::Vector2u newSize) {
     }
 }
 
-// -------------------- Init: Bounce/Spiral base --------------------
+// -------------------- control del modelo (Nebula) --------------------
+void TextRender::updateModel(float dt) {
+    if (!modelEnabled_ || !model_) return;
+
+    modelCtrl_.timer -= dt;
+
+    if (modelCtrl_.mode == ModelCtrl::Mode::RotateY) {
+        modelCtrl_.yawDeg += modelCtrl_.yawVelDeg * dt;
+
+        // decaimiento exponencial del offset hacia el centro
+        float k = 2.0f;
+        modelCtrl_.offset.x *= std::exp(-k * dt);
+        modelCtrl_.offset.y *= std::exp(-k * dt);
+
+        if (modelCtrl_.timer <= 0.f) {
+            // Cambiar a drift
+            modelCtrl_.mode = ModelCtrl::Mode::Drift;
+            float speedPix = frand(60.f, 160.f);
+            float sx = (std::rand()%2 ? 1.f : -1.f);
+            float sy = (std::rand()%2 ? 1.f : -1.f);
+            float inv = 1.0f / std::sqrt(2.f);
+            modelCtrl_.driftVel = { sx * speedPix * inv, sy * speedPix * inv };
+            modelCtrl_.timer = frand(2.0f, 4.0f);
+            modelCtrl_.returning = false;
+        }
+    } else { // Drift
+        if (!modelCtrl_.returning) {
+            modelCtrl_.offset += modelCtrl_.driftVel * dt;
+            if (modelCtrl_.timer <= 0.f) modelCtrl_.returning = true;
+        } else {
+            // regreso suave al centro
+            sf::Vector2f toCenter = {-modelCtrl_.offset.x, -modelCtrl_.offset.y};
+            float len = std::sqrt(toCenter.x*toCenter.x + toCenter.y*toCenter.y);
+            float retSpeed = 180.f; // px/s
+            if (len > 1e-3f) {
+                toCenter.x /= len; toCenter.y /= len;
+                modelCtrl_.offset.x += toCenter.x * retSpeed * dt;
+                modelCtrl_.offset.y += toCenter.y * retSpeed * dt;
+            }
+            if (std::abs(modelCtrl_.offset.x) < 2.f && std::abs(modelCtrl_.offset.y) < 2.f) {
+                modelCtrl_.offset = {0.f, 0.f};
+                modelCtrl_.returning = false;
+                modelCtrl_.mode = ModelCtrl::Mode::RotateY;
+                modelCtrl_.yawVelDeg = frand(40.f, 120.f) * ((std::rand()%2)? 1.f : -1.f);
+                modelCtrl_.timer = frand(2.5f, 5.0f);
+            }
+        }
+    }
+}
+
+// -------------------- init partículas (Bounce/Spiral) --------------------
 void TextRender::initParticles(int N, const sf::Font& font) {
     ps.clear(); ps.reserve(N);
     const float minR = 20.f;
@@ -128,11 +220,9 @@ void TextRender::initParticles(int N, const sf::Font& font) {
     }
 }
 
-// -------------------- Init: Nebula --------------------
+// -------------------- init Nebula --------------------
 void TextRender::initNebula(int N, const sf::Font& font) {
     ps.clear(); ps.reserve(N);
-
-    // escalar tamaño si N es muy grande para no saturar
     const float densityScale = std::clamp(300.f / float(std::max(200, N)), 0.35f, 1.0f);
 
     for (int i = 0; i < N; ++i) {
@@ -144,14 +234,11 @@ void TextRender::initNebula(int N, const sf::Font& font) {
         p.baseSize = float(charSize_) * densityScale;
         p.text.setCharacterSize(unsigned(p.baseSize));
 
-        // color inicial
         float t01 = frand(0.f, 1.f);
         p.text.setFillColor(nebulaColor(t01, 200.f));
 
-        // POSICIÓN EN TODA LA PANTALLA (uniforme)
         p.pos = { frand(0.f, float(size_.x)), frand(0.f, float(size_.y)) };
 
-        // velocidad inicial en dirección aleatoria, magnitud ~ speed_
         const float ang = frand(0.f, 6.2831853f);
         const float vmag = std::max(30.f, speed_) * frand(0.5f, 1.0f) * 0.5f;
         p.vel = { vmag * std::cos(ang), vmag * std::sin(ang) };
@@ -174,24 +261,20 @@ void TextRender::initNebula(int N, const sf::Font& font) {
     }
 }
 
-// -------------------- Campo de flujo Nebula --------------------
+// -------------------- campo de flujo + color Nebula --------------------
 sf::Vector2f TextRender::nebulaFlowField(const sf::Vector2f& p, float seed, float t) const {
-    (void)p; // no usamos centro
+    (void)p;
     float nx = std::sin(0.08f * t + seed * 0.71f);
     float ny = std::cos(0.11f * t + seed * 1.31f);
-    // Aceleración suave y variable para que no sea movimiento lineal perfecto
     return { 12.f * nx, 12.f * ny };
 }
 
-
-// Gradiente “nebular”: azul -> purpura -> rosa -> dorado tenue
 sf::Color TextRender::nebulaColor(float t01, float alpha) const {
     t01 = std::clamp(t01, 0.f, 1.f);
-
-    sf::Color a(80,   0,   0);   // rojo muy oscuro
-    sf::Color b(180,  30,  30);  // rojo medio
-    sf::Color c(255,  60,  60);  // rojo vivo
-    sf::Color d(255, 160,  60);  // naranja-amarillo
+    sf::Color a(80,   0,   0);
+    sf::Color b(180,  30,  30);
+    sf::Color c(255,  60,  60);
+    sf::Color d(255, 160,  60);
 
     auto lerp = [](const sf::Color& u, const sf::Color& v, float t){
         return sf::Color(
@@ -211,22 +294,18 @@ sf::Color TextRender::nebulaColor(float t01, float alpha) const {
     return m;
 }
 
-// -------------------- Update: Nebula --------------------
+// -------------------- update Nebula (partículas) --------------------
 void TextRender::updateNebula(Particle& p, float dt) {
-    // Aceleración “ruido” muy suave (opcional)
     sf::Vector2f flow = nebulaFlowField(p.pos, p.noiseSeed, time_);
     p.vel.x += flow.x * dt;
     p.vel.y += flow.y * dt;
 
-    // Limita velocidad
     float vmax = std::max(40.f, speed_) * 0.5f;
     float vlen = std::sqrt(p.vel.x*p.vel.x + p.vel.y*p.vel.y);
     if (vlen > vmax) { p.vel.x *= vmax/vlen; p.vel.y *= vmax/vlen; }
 
-    // Integración
     p.pos += p.vel * dt;
 
-    // giro propio + respiración
     p.spinDeg += p.spinVelDeg * dt;
     p.scale += p.scaleVel * dt;
     if (p.scale < 0.7f) { p.scale = 0.7f; p.scaleVel = std::abs(p.scaleVel); }
@@ -240,46 +319,14 @@ void TextRender::updateNebula(Particle& p, float dt) {
     sf::Color col = nebulaColor(t01, p.alpha);
     p.text.setFillColor(col);
 
-    // Centro de rotación al medio del glifo
     sf::FloatRect lb = p.text.getLocalBounds();
     p.text.setOrigin(lb.left + lb.width * 0.5f, lb.top + lb.height * 0.5f);
-
-    // --- REBOTE EN BORDES (con tamaño real del glifo) ---
-    // Semitamaño del glifo con la escala actual en píxeles
-    const float halfW = 0.5f * lb.width  * p.scale;
-    const float halfH = 0.5f * lb.height * p.scale;
-
-    const float restitution = 0.9f; // 1.0 = rebote perfecto; <1 = pierde un poco
-    const float wallFriction = 0.98f;
-
-    if (p.pos.x < halfW) {
-        p.pos.x = halfW;
-        p.vel.x = -p.vel.x * restitution;
-        p.vel.y *= wallFriction;
-    } else if (p.pos.x > float(size_.x) - halfW) {
-        p.pos.x = float(size_.x) - halfW;
-        p.vel.x = -p.vel.x * restitution;
-        p.vel.y *= wallFriction;
-    }
-
-    if (p.pos.y < halfH) {
-        p.pos.y = halfH;
-        p.vel.y = -p.vel.y * restitution;
-        p.vel.x *= wallFriction;
-    } else if (p.pos.y > float(size_.y) - halfH) {
-        p.pos.y = float(size_.y) - halfH;
-        p.vel.y = -p.vel.y * restitution;
-        p.vel.x *= wallFriction;
-    }
-    // --- fin rebote ---
-
-    // Aplicar transformaciones finales
     p.text.setPosition(p.pos);
     p.text.setRotation(p.spinDeg);
     p.text.setScale(p.scale, p.scale);
 }
 
-// -------------------- Init/Update: Rain y Dashes (igual que tenias) --------------------
+// -------------------- lluvia Matrix --------------------
 void TextRender::initRain(int approxTotalGlyphs, const sf::Font& font) {
     drops.clear();
 
@@ -392,7 +439,7 @@ void TextRender::updateRain(float dt) {
     }
 }
 
-// -------------------- Dashes --------------------
+// -------------------- líneas punteadas --------------------
 void TextRender::initDashes(const sf::Font& font, int count) {
     dashes.clear();
     dashes.reserve(count);
@@ -470,7 +517,7 @@ void TextRender::updateDashes(float dt) {
     }
 }
 
-// -------------------- Update: Bounce/Spiral (como tenias) --------------------
+// -------------------- bounce/spiral --------------------
 void TextRender::updateBounce(Particle& p, float dt) {
     #pragma omp critical
     {

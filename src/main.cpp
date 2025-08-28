@@ -152,19 +152,28 @@ static bool parse_cli(int argc, char** argv, CliOptions& opts) {
     return true;
 }
 
-// (resto del main igual que lo tenias)
-#include <chrono>
 static int run_loop(const CliOptions& opts, bool vsync = true) {
     namespace fs = std::filesystem;
     using clock_t = std::chrono::steady_clock;
 
-    sf::RenderWindow window(sf::VideoMode(opts.width, opts.height), "Matrix N caracteres");
+    // Solicitar z-buffer
+    sf::ContextSettings ctx;
+    ctx.depthBits = 24;
+    ctx.stencilBits = 0;
+    ctx.antialiasingLevel = 0;
+    ctx.majorVersion = 2;
+    ctx.minorVersion = 1;
+
+    sf::RenderWindow window(sf::VideoMode(opts.width, opts.height),
+                            "Matrix N caracteres",
+                            sf::Style::Default,
+                            ctx);
     if (vsync) window.setVerticalSyncEnabled(true);
     else window.setFramerateLimit(60);
 
     sf::Font font;
     if (!font.loadFromFile("assets/fonts/Matrix-MZ4P.ttf")) {
-        std::cerr << "Error cargando fuente.\n"; 
+        std::cerr << "Error cargando fuente.\n";
         return EXIT_FAILURE;
     }
 
@@ -176,7 +185,7 @@ static int run_loop(const CliOptions& opts, bool vsync = true) {
     #else
         int threads_eff = 1;
     #endif
-        const char* exec = opts.forceSequential ? "seq" : "omp";
+    const char* exec = opts.forceSequential ? "seq" : "omp";
 
     std::ofstream benchOut;
     const bool benchEnabled = !opts.benchPath.empty();
@@ -251,7 +260,7 @@ static int run_parallel(const CliOptions& opts) {
 #ifdef _OPENMP
     if (opts.threads > 0) omp_set_num_threads(opts.threads);
 
-    // Mensaje de arranque en una región paralela
+    // Mensaje de arranque en región paralela
     #pragma omp parallel
     {
         #pragma omp single
@@ -265,8 +274,7 @@ static int run_parallel(const CliOptions& opts) {
     int result = 0;
 
 #ifdef _OPENMP
-    // Ejecuta el bucle principal dentro de una región paralela,
-    // pero una sola hebra llama a run_loop
+    // Ejecuta el bucle principal dentro de región paralela: solo 1 hilo llama a run_loop
     #pragma omp parallel
     {
         #pragma omp single
@@ -281,6 +289,7 @@ static int run_parallel(const CliOptions& opts) {
 
     return result;
 }
+
 
 int main(int argc, char** argv) {
     CliOptions opts;

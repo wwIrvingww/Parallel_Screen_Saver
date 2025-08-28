@@ -3,10 +3,12 @@
 #include <vector>
 #include <random>
 #include <string>
+#include <memory>
+#include "ObjModel.h"
 
-// Ahora incluye Nebula
+// Modos
 enum class MotionMode { Bounce, Spiral, Rain, Nebula };
-enum class Palette    { Mono, Neon, Rainbow }; // ignorado en Rain
+enum class Palette    { Mono, Neon, Rainbow };
 
 class TextRender {
 public:
@@ -30,18 +32,18 @@ private:
         sf::Vector2f vel;
         float baseSize;
 
-        // Usados por Spiral
+        // Spiral
         float angle, angVel, baseRadius, radiusAmp;
         float z, zVel, phase;
 
-        // Usados por Nebula
-        float spinDeg;     // rotacion propia
-        float spinVelDeg;  // vel de giro
-        float scale;       // escala actual (pulsacion)
-        float scaleVel;    // vel de cambio de escala
-        float alpha;       // 0..255
-        float alphaVel;    // vel de alpha
-        float noiseSeed;   // semilla para campo de flujo
+        // Nebula
+        float spinDeg;
+        float spinVelDeg;
+        float scale;
+        float scaleVel;
+        float alpha;
+        float alphaVel;
+        float noiseSeed;
     };
     std::vector<Particle> ps;
 
@@ -54,7 +56,7 @@ private:
     };
     std::vector<Drop> drops;
 
-    // --------- Lineas punteadas ---------
+    // --------- Líneas punteadas ---------
     struct DashLine {
         std::vector<sf::Text> dots;
         float xLeft;
@@ -64,6 +66,20 @@ private:
         float dotWidth;
     };
     std::vector<DashLine> dashes;
+
+    // --------- Modelo OBJ (Nebula) ---------
+    std::unique_ptr<ObjModel> model_;
+    bool   modelEnabled_ = false;
+
+    struct ModelCtrl {
+        enum class Mode { RotateY, Drift } mode = Mode::RotateY;
+        float yawDeg = 0.f;
+        float yawVelDeg = 0.f;
+        sf::Vector2f offset{0.f, 0.f};    // desplazamiento en pantalla
+        sf::Vector2f driftVel{0.f, 0.f};  // px/s
+        float timer = 0.f;                 // cambia de estado cuando llega a 0
+        bool  returning = false;           // en retorno al centro
+    } modelCtrl_;
 
     // --------- Estado general ---------
     sf::Vector2u size_;
@@ -83,18 +99,21 @@ private:
 
     // Inicializaciones
     void initParticles(int N, const sf::Font& font);         // Bounce/Spiral base
-    void initNebula(int N, const sf::Font& font);            // NUEVO
+    void initNebula(int N, const sf::Font& font);
     void initRain(int approxTotalGlyphs, const sf::Font& font);
     void initDashes(const sf::Font& font, int count);
 
     // Actualizaciones
     void updateBounce(Particle& p, float dt);
     void updateSpiral(Particle& p, float dt);
-    void updateNebula(Particle& p, float dt);                 // NUEVO
+    void updateNebula(Particle& p, float dt);
     void updateRain(float dt);
     void updateDashes(float dt);
 
+    // Control del modelo (Nebula)
+    void updateModel(float dt);
+
     // Utilidad Nebula
     sf::Vector2f nebulaFlowField(const sf::Vector2f& p, float seed, float t) const;
-    sf::Color nebulaColor(float t01, float alpha) const;      // gradiente
+    sf::Color nebulaColor(float t01, float alpha) const;
 };
