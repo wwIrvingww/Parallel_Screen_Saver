@@ -2,41 +2,40 @@
 #include <SFML/Graphics.hpp>
 #include <vector>
 #include <string>
+#include <utility>
+#include <cstdint>
 
 class ObjModel {
 public:
-    // Carga OBJ simple: usa 'v' y 'f'. (f admite v, v/vt, v//vn, v/vt/vn)
-    bool loadFromFile(const std::string& path);
+    // Carga .obj (solo 'v' y 'f' necesarios para wireframe). Normaliza al cubo unidad.
+    bool loadFromOBJ(const std::string& path);
 
-    // Proyecta usando el plano de mayor área (XY/XZ/YZ) y escala para encajar targetPx
-    void drawProjectedAutoFit(sf::RenderWindow& window,
-                              sf::Vector2f center,
-                              float targetPx,
-                              sf::Color color = sf::Color(220,220,220,235)) const;
+    // Dibuja en 1 sola draw call usando el VertexArray interno.
+    // angleY en radianes. scale en píxeles (multiplica al modelo normalizado).
+    void drawProjected(sf::RenderWindow& window,
+                       sf::Vector2f center,
+                       float scale,
+                       float angleY,
+                       sf::Color color);
 
-    // Proyección en plano XY, con rotación around-Y y desplazamiento en pantalla.
-    // El escalado se calcula para que la *mayor* proyección posible al rotar en Y
-    // quepa en targetPx (usa max( sqrt(ex^2+ez^2), ey )).
-    void drawProjectedYawAndOffset(sf::RenderWindow& window,
-                                   sf::Vector2f center,
-                                   float targetPx,
-                                   float yawDeg,
-                                   sf::Vector2f screenOffset,
-                                   sf::Color color = sf::Color(220,220,220,235)) const;
-
-    // Stats y bbox
-    const sf::Vector3f& minBounds() const { return min_; }
-    const sf::Vector3f& maxBounds() const { return max_; }
-    bool   empty()        const { return vertices_.empty() || indices_.empty(); }
-    size_t vertexCount()  const { return vertices_.size(); }
-    size_t triangleCount()const { return indices_.size() / 3; }
+    bool loaded() const { return loaded_; }
 
 private:
-    std::vector<sf::Vector3f> vertices_; // (x,y,z)
-    std::vector<unsigned>     indices_;  // triangulado
+    struct Vec3 { float x, y, z; };
 
-    sf::Vector3f min_{0,0,0}, max_{0,0,0};
+    // Datos originales y buffers reutilizados
+    std::vector<Vec3> vertices_;              // v originales (normalizados)
+    std::vector<Vec3> vtxRot_;                // rotados (Y) para el frame actual
+    std::vector<sf::Vector2f> vtx2d_;         // proyectados 2D para el frame actual
 
-    static bool parseFaceIndex(const std::string& tok, int& outIndex); // 1-based -> 0-based
-    void computeBounds();
+    // Aristas únicas (indices en vertices_)
+    std::vector<std::pair<uint32_t,uint32_t>> edges_;
+
+    // Un solo VA para todas las líneas (2 vértices por arista)
+    sf::VertexArray lines_{sf::Lines};
+
+    bool loaded_ = false;
+
+    // Helpers
+    static bool parseFaceIndex(const std::string& tok, int nVerts, uint32_t& out0based);
 };

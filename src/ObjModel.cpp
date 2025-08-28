@@ -1,182 +1,170 @@
 #include "ObjModel.h"
 #include <fstream>
 #include <sstream>
+#include <string>
+#include <unordered_set>
 #include <algorithm>
-#include <cctype>
-#include <iostream> // logs
 #include <cmath>
 
-static std::string trim(const std::string& s) {
-    size_t a = 0, b = s.size();
-    while (a < b && std::isspace((unsigned char)s[a])) ++a;
-    while (b > a && std::isspace((unsigned char)s[b-1])) --b;
-    return s.substr(a, b - a);
+static inline uint64_t edge_key(uint32_t a, uint32_t b) {
+    if (a > b) std::swap(a, b);
+    return (uint64_t(a) << 32) | uint64_t(b);
 }
 
-bool ObjModel::parseFaceIndex(const std::string& tok, int& outIndex) {
-    // token puede ser "i", "i/j", "i//k", "i/j/k"
+bool ObjModel::parseFaceIndex(const std::string& tok, int nVerts, uint32_t& out0based) {
+    // Soporta "i", "i/j", "i//k", "i/j/k". Admite negativos según .obj (desde el final).
+    // Tomamos solo el primer campo (posición).
     if (tok.empty()) return false;
-    std::istringstream iss(tok);
+    int slash = tok.find('/');
+    std::string s = (slash == int(std::string::npos)) ? tok : tok.substr(0, slash);
+
     int idx = 0;
-    if (!(iss >> idx)) return false;
-    outIndex = idx - 1; // OBJ es 1-based
+    try { idx = std::stoi(s); } catch (...) { return false; }
+    if (idx == 0) return false;
+
+    int zeroBased = (idx > 0) ? (idx - 1) : (nVerts + idx); // idx < 0 => desde el final
+    if (zeroBased < 0 || zeroBased >= nVerts) return false;
+    out0based = static_cast<uint32_t>(zeroBased);
     return true;
 }
 
-void ObjModel::computeBounds() {
-    if (vertices_.empty()) { min_ = max_ = {0,0,0}; return; }
-    min_ = max_ = vertices_[0];
-    for (auto& v : vertices_) {
-        min_.x = std::min(min_.x, v.x);
-        min_.y = std::min(min_.y, v.y);
-        min_.z = std::min(min_.z, v.z);
-        max_.x = std::max(max_.x, v.x);
-        max_.y = std::max(max_.y, v.y);
-        max_.z = std::max(max_.z, v.z);
-    }
-}
-
-bool ObjModel::loadFromFile(const std::string& path) {
-    vertices_.clear(); indices_.clear();
-    min_ = max_ = {0,0,0};
-
+bool ObjModel::loadFromOBJ(const std::string& path) {
     std::ifstream in(path);
     if (!in) return false;
 
-    std::string line;
-    std::vector<int> faceIdx;
-    while (std::getline(in, line)) {
-        line = trim(line);
-        if (line.empty() || line[0] == '#') continue;
+    vertices_.clear();
+    edges_.clear();
+    vtxRot_.clear();
+    vtx2d_.clear();
+    lines_.clear();
 
-        std::istringstream ls(line);
-        std::string tag; ls >> tag;
+    std::string line;
+    vertices_.reserve(10000);
+
+    // 1) Parsear vertices y caras
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream iss(line);
+        std::string tag; iss >> tag;
         if (tag == "v") {
-            float x, y, z;
-            if (ls >> x >> y >> z) {
-                vertices_.push_back(sf::Vector3f(x, y, z));
-            }
-        } else if (tag == "f") {
-            faceIdx.clear();
+            Vec3 v{};
+            iss >> v.x >> v.y >> v.z;
+            vertices_.push_back(v);
+        }
+        // ignoramos 'vn', 'vt', 'o', 'g', etc.
+    }
+
+    if (vertices_.empty()) {
+        loaded_ = false;
+        return false;
+    }
+
+    // Reposicionar para segunda pasada (caras)
+    in.clear();
+    in.seekg(0);
+
+    std::unordered_set<uint64_t> uniq;
+    uniq.reserve(50000);
+
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        if (line.size() >= 2 && line[0] == 'f' && std::isspace(static_cast<unsigned char>(line[1]))) {
+            std::istringstream iss(line);
+            std::string tag; iss >> tag; // 'f'
+
+            std::vector<uint32_t> idx;
             std::string tok;
-            while (ls >> tok) {
-                size_t slash = tok.find('/');
-                std::string head = (slash == std::string::npos) ? tok : tok.substr(0, slash);
-                int idx0 = 0;
-                if (!parseFaceIndex(head, idx0)) continue;
-                if (idx0 < 0) idx0 = (int)vertices_.size() + idx0 + 1 - 1; // negativos: -1 = último
-                faceIdx.push_back(idx0);
+            while (iss >> tok) {
+                uint32_t i0;
+                if (parseFaceIndex(tok, (int)vertices_.size(), i0)) idx.push_back(i0);
             }
-            if (faceIdx.size() >= 3) {
-                for (size_t i = 1; i + 1 < faceIdx.size(); ++i) {
-                    indices_.push_back((unsigned)faceIdx[0]);
-                    indices_.push_back((unsigned)faceIdx[i]);
-                    indices_.push_back((unsigned)faceIdx[i+1]);
-                }
+            if (idx.size() < 2) continue;
+
+            // Agregar aristas del polígono (cerrado)
+            for (size_t i = 0; i < idx.size(); ++i) {
+                uint32_t a = idx[i];
+                uint32_t b = idx[(i + 1) % idx.size()];
+                if (a == b) continue;
+                uniq.insert(edge_key(a, b));
             }
         }
     }
 
-    if (vertices_.empty() || indices_.empty()) return false;
-    computeBounds();
+    // Pasar set -> vector ordenado (opcional)
+    edges_.reserve(uniq.size());
+    for (auto k : uniq) {
+        uint32_t a = uint32_t(k >> 32);
+        uint32_t b = uint32_t(k & 0xffffffffu);
+        edges_.emplace_back(a, b);
+    }
+    std::sort(edges_.begin(), edges_.end());
 
-    std::cerr << "[OBJ] Cargado: " << vertexCount() << " vertices, "
-              << triangleCount() << " tri, bbox=[("
-              << min_.x << "," << min_.y << "," << min_.z << ")..("
-              << max_.x << "," << max_.y << "," << max_.z << ")]\n";
+    // 2) Normalizar modelo al cubo unidad (centro en origen; tamaño ~1)
+    Vec3 mn = vertices_[0], mx = vertices_[0];
+    for (const auto& v : vertices_) {
+        mn.x = std::min(mn.x, v.x); mn.y = std::min(mn.y, v.y); mn.z = std::min(mn.z, v.z);
+        mx.x = std::max(mx.x, v.x); mx.y = std::max(mx.y, v.y); mx.z = std::max(mx.z, v.z);
+    }
+    Vec3 c{ (mn.x + mx.x)*0.5f, (mn.y + mx.y)*0.5f, (mn.z + mx.z)*0.5f };
+    float sx = mx.x - mn.x, sy = mx.y - mn.y, sz = mx.z - mn.z;
+    float maxDim = std::max({ sx, sy, sz, 1e-6f });
+    float inv = 1.0f / maxDim;
 
+    for (auto& v : vertices_) {
+        v.x = (v.x - c.x) * inv;
+        v.y = (v.y - c.y) * inv;
+        v.z = (v.z - c.z) * inv;
+    }
+    for (auto& v : vertices_) {
+        v.y = -v.y;
+        v.z = -v.z;
+    }
+
+    // 3) Reservar buffers reutilizables
+    vtxRot_.resize(vertices_.size());
+    vtx2d_.resize(vertices_.size());
+    lines_.resize(edges_.size() * 2);
+    lines_.setPrimitiveType(sf::Lines);
+
+    loaded_ = true;
     return true;
 }
 
-void ObjModel::drawProjectedAutoFit(sf::RenderWindow& window,
-                                    sf::Vector2f center,
-                                    float targetPx,
-                                    sf::Color color) const
-{
-    if (empty()) return;
+void ObjModel::drawProjected(sf::RenderWindow& window,
+                             sf::Vector2f center,
+                             float scale,
+                             float angleY,
+                             sf::Color color) {
+    if (!loaded_) return;
 
-    // Centro y extensiones
-    sf::Vector3f c{ 0.5f*(min_.x+max_.x), 0.5f*(min_.y+max_.y), 0.5f*(min_.z+max_.z) };
-    float ex = max_.x - min_.x;
-    float ey = max_.y - min_.y;
-    float ez = max_.z - min_.z;
-
-    // Plano de mayor área
-    float aXY = ex*ey, aXZ = ex*ez, aYZ = ey*ez;
-    enum Plane { XY, XZ, YZ } plane = XY;
-    float sideU=ex, sideV=ey;
-    if (aXZ >= aXY && aXZ >= aYZ) { plane = XZ; sideU = ex; sideV = ez; }
-    else if (aYZ >= aXY && aYZ >= aXZ) { plane = YZ; sideU = ey; sideV = ez; }
-
-    float modelSide = std::max(sideU, sideV);
-    if (modelSide <= 1e-6f) modelSide = 1.f;
-    float scale = targetPx / modelSide;
-
-    sf::VertexArray tris(sf::Triangles);
-    tris.resize(indices_.size());
-
-    for (size_t t = 0; t < indices_.size(); ++t) {
-        const sf::Vector3f& v = vertices_[indices_[t]];
-        float u = 0.f, vv = 0.f;
-        switch (plane) {
-            case XY: u = (v.x - c.x); vv = (v.y - c.y); break;
-            case XZ: u = (v.x - c.x); vv = (v.z - c.z); break;
-            case YZ: u = (v.y - c.y); vv = (v.z - c.z); break;
-        }
-        float x = center.x + u * scale;
-        float y = center.y - vv * scale; // invertimos Y para pantalla
-        tris[t].position = sf::Vector2f(x, y);
-        tris[t].color = color;
+    // 1) Rotación Y (una sola sin/cos)
+    float c = std::cos(angleY);
+    float s = std::sin(angleY);
+    for (size_t i = 0; i < vertices_.size(); ++i) {
+        const auto& v = vertices_[i];
+        float xr =  c * v.x + s * v.z;
+        float zr = -s * v.x + c * v.z;
+        vtxRot_[i] = { xr, v.y, zr };
     }
 
-    window.draw(tris);
-}
-
-void ObjModel::drawProjectedYawAndOffset(sf::RenderWindow& window,
-                                         sf::Vector2f center,
-                                         float targetPx,
-                                         float yawDeg,
-                                         sf::Vector2f screenOffset,
-                                         sf::Color color) const
-{
-    if (empty()) return;
-
-    // Centro y extensiones
-    sf::Vector3f c{ 0.5f*(min_.x+max_.x), 0.5f*(min_.y+max_.y), 0.5f*(min_.z+max_.z) };
-    float ex = max_.x - min_.x;
-    float ey = max_.y - min_.y;
-    float ez = max_.z - min_.z;
-
-    // Para rotación en Y, el mayor ancho posible en pantalla será max( sqrt(ex^2+ez^2), ey )
-    float exz = std::sqrt(ex*ex + ez*ez);
-    float modelSide = std::max(exz, ey);
-    if (modelSide <= 1e-6f) modelSide = 1.f;
-    float scale = targetPx / modelSide;
-
-    const float rad = yawDeg * 3.1415926535f / 180.f;
-    const float cs = std::cos(rad);
-    const float sn = std::sin(rad);
-
-    sf::VertexArray tris(sf::Triangles);
-    tris.resize(indices_.size());
-
-    for (size_t t = 0; t < indices_.size(); ++t) {
-        const sf::Vector3f& v = vertices_[indices_[t]];
-        // Trasladar al centro local, rotar Y, proyectar XY:
-        float dx = v.x - c.x;
-        float dy = v.y - c.y;
-        float dz = v.z - c.z;
-
-        float x =  cs*dx + sn*dz;
-        float y =  dy;
-        // z' = -sn*dx + cs*dz; // no se usa en proyección ortográfica XY
-
-        float sx = center.x + screenOffset.x + x * scale;
-        float sy = center.y + screenOffset.y - y * scale; // invertimos Y
-
-        tris[t].position = sf::Vector2f(sx, sy);
-        tris[t].color = color;
+    // 2) Proyección (perspectiva simple)
+    const float F = 800.0f;
+    for (size_t i = 0; i < vtxRot_.size(); ++i) {
+        const auto& v = vtxRot_[i];
+        float w = F / (F + (v.z * scale * 0.8f)); // z afecta un poco el zoom
+        vtx2d_[i].x = center.x + (v.x * scale) * w;
+        vtx2d_[i].y = center.y + (v.y * scale) * w;
     }
 
-    window.draw(tris);
+    // 3) Construir VertexArray (2 vértices por arista) y dibujar 1 vez
+    for (size_t k = 0; k < edges_.size(); ++k) {
+        auto [a, b] = edges_[k];
+        sf::Vertex& v0 = lines_[2 * k + 0];
+        sf::Vertex& v1 = lines_[2 * k + 1];
+        v0.position = vtx2d_[a];
+        v1.position = vtx2d_[b];
+        v0.color = color;
+        v1.color = color;
+    }
+    window.draw(lines_);
 }

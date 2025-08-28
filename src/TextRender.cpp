@@ -39,7 +39,7 @@ TextRender::TextRender(int N,
 
         // OBJ centrado en pantalla
         model_ = std::make_unique<ObjModel>();
-        modelEnabled_ = model_->loadFromFile("assets/models/center.obj");
+        modelEnabled_ = model_->loadFromOBJ("assets/models/center.obj");
         if (!modelEnabled_) {
             std::cerr << "[OBJ] No se pudo cargar assets/models/center.obj\n";
         }
@@ -99,14 +99,24 @@ void TextRender::render(sf::RenderWindow& window) {
         for (auto& L : dashes)
             for (auto& dot : L.dots) window.draw(dot);
     } else if (mode_ == MotionMode::Nebula) {
-        for (auto& p : ps) window.draw(p.text);
-        if (modelEnabled_ && model_) {
-            sf::Vector2f center(float(size_.x) * 0.5f, float(size_.y) * 0.5f);
-            float target = 0.40f * std::min(float(size_.x), float(size_.y));
-            model_->drawProjectedYawAndOffset(window, center, target,
-                                              modelCtrl_.yawDeg, modelCtrl_.offset,
-                                              sf::Color(220,220,220,235));
-        }
+    for (auto& p : ps) window.draw(p.text);
+    if (modelEnabled_ && model_) {
+        // centro desplazado por el offset animado
+        sf::Vector2f centerPx(
+            float(size_.x) * 0.5f + modelCtrl_.offset.x,
+            float(size_.y) * 0.5f + modelCtrl_.offset.y
+        );
+
+        // escala del modelo
+        float scalePx = 0.40f * std::min(float(size_.x), float(size_.y));
+
+        // convertir grados -> radianes
+        float angleRad = modelCtrl_.yawDeg * 0.01745329252f; // pi/180
+
+        // NUEVA llamada (reemplaza a drawProjectedYawAndOffset)
+        model_->drawProjected(window, centerPx, scalePx, angleRad,
+                              sf::Color(220, 220, 220, 235));
+    }
     } else {
         for (auto& p : ps) window.draw(p.text);
     }
