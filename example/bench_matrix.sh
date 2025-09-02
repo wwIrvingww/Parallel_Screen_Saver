@@ -34,17 +34,19 @@ run() {
   "$BUILD_DIR/matrix_screensaver" "$N" "$RES" --mode "$mode" --bench "$CSV" --bench-frames "$FRAMES" "$@"
 }
 
-# --- Pruebas: 12 ejecuciones (>=10) ---
+# --- Pruebas: 16 ejecuciones (>=10) ---
 # Secuencial (base)
 run rain   --seq
 run bounce --seq
 run spiral --seq
+run nebula --seq
 
 # Paralelo con distintos hilos
 for T in 2 4 8; do
   run rain   --threads "$T"
   run bounce --threads "$T"
   run spiral --threads "$T"
+  run nebula --threads "$T"
 done
 
 echo "Archivo generado: $CSV"

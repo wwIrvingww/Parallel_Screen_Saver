@@ -8,7 +8,7 @@
 
 typedef struct {
     char exec[MAX_STR];      // "seq" | "omp"
-    char mode[MAX_STR];      // "rain" | "bounce" | "spiral"
+    char mode[MAX_STR];      // "rain" | "bounce" | "spiral" | "nebula"
     int  threads_req;        // solicitado por CLI
     int  threads_eff;        // efectivo (omp_get_max_threads)
     int  width, height, N, frame;
@@ -184,7 +184,7 @@ static void dirname_from_path(const char* in, char* out, size_t outsz) {
 
 static int write_summary_csv(const char* dir, const GroupVec* v, const GroupVec* bases) {
     char outpath[1024];
-    snprintf(outpath, sizeof(outpath), "%s/bench_summary.csv", dir);
+    snprintf(outpath, sizeof(outpath), "%s/bench_summary2.csv", dir);
     FILE* f = fopen(outpath, "w");
     if (!f) { fprintf(stderr, "No pude escribir %s\n", outpath); return 0; }
 
@@ -221,7 +221,7 @@ static int write_summary_csv(const char* dir, const GroupVec* v, const GroupVec*
 
 static int write_anexo_md(const char* dir, const GroupVec* v, const GroupVec* bases) {
     char outpath[1024];
-    snprintf(outpath, sizeof(outpath), "%s/Anexo3_Bitacora.md", dir);
+    snprintf(outpath, sizeof(outpath), "%s/Anexo3_Bitacora2.md", dir);
     FILE* f = fopen(outpath, "w");
     if (!f) { fprintf(stderr, "No pude escribir %s\n", outpath); return 0; }
 
